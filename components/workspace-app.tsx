@@ -512,7 +512,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
               <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Private Studio</p>
               <h1 className="mt-3 text-3xl font-semibold tracking-[-0.06em]">MyMake</h1>
               <p className="mt-2 text-sm leading-6 text-slate-400">
-                Upload a Next.js design zip, inspect the live preview, and rewrite the UI with AI.
+                Upload a React design zip, inspect the live preview, and rewrite the UI with AI.
               </p>
             </div>
             <button
@@ -532,8 +532,8 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
               <div>
                 <p className="text-sm font-semibold">Import a zipped design app</p>
                 <p className="mt-1 text-xs leading-5 text-slate-400">
-                  Supports single Next.js frontend projects with local assets and no external
-                  services.
+                  Supports single Next.js or Vite React frontend projects with local assets and no
+                  external services.
                 </p>
               </div>
             </div>
@@ -782,13 +782,13 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                     <div className="mx-auto inline-flex rounded-3xl border border-white/10 bg-white/[0.04] p-5 text-cyan-200">
                       <MonitorSmartphone className="h-8 w-8" />
                     </div>
-                    <h3 className="mt-6 text-3xl font-semibold tracking-[-0.05em] text-white">
-                      Import your first design project
-                    </h3>
-                    <p className="mt-4 text-base leading-8 text-slate-400">
-                      Upload a Next.js zip from the left rail to start a live preview workspace with
-                      direct element picking, AI edits, revision history, and export.
-                    </p>
+                  <h3 className="mt-6 text-3xl font-semibold tracking-[-0.05em] text-white">
+                    Import your first design project
+                  </h3>
+                  <p className="mt-4 text-base leading-8 text-slate-400">
+                    Upload a React app zip from the left rail to start a live preview workspace
+                    with direct element picking, AI edits, revision history, and export.
+                  </p>
                   </div>
                 )}
               </div>

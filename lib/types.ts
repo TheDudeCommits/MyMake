@@ -2,6 +2,7 @@ export type PackageManager = "npm" | "pnpm" | "yarn";
 export type ProjectStatus = "installing" | "ready" | "error" | "unsupported";
 export type RevisionSource = "upload" | "ai" | "manual" | "undo" | "redo";
 export type DevicePreset = "desktop" | "tablet" | "mobile";
+export type ProjectRuntime = "next" | "vite";
 
 export interface ProjectRecord {
   id: string;

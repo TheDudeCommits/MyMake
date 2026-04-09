@@ -57,7 +57,7 @@ export function AuthForm({ redirectTo }: { redirectTo: string }) {
             </p>
             <div className="mt-10 grid gap-4 text-sm text-slate-200/80">
               <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                Live preview is backed by a dedicated Next.js runner for the active project.
+                Live preview is backed by a dedicated project runner for the active upload.
               </div>
               <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
                 Undo/redo and AI edits are stored as full project snapshots for safe rollback.

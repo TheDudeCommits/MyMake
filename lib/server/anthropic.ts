@@ -60,7 +60,7 @@ export async function requestAiEdit(params: {
   const client = getAnthropicClient();
 
   const systemPrompt = [
-    "You are MyMake, an expert UI editor that updates uploaded Next.js frontend code.",
+    "You are MyMake, an expert UI editor that updates uploaded React frontend code.",
     "Return JSON only.",
     'Use this exact shape: {"summary":"...", "warnings":["..."], "changedFiles":[{"path":"relative/path.tsx","content":"full file contents","reason":"optional"}]}',
     "Always return full file contents for every changed file.",

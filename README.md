@@ -1,6 +1,6 @@
 # MyMake
 
-MyMake is a personal AI-powered UI editor for uploaded Next.js projects. It accepts a zipped frontend app, spins up a live preview runner, lets you pick elements directly in the preview, and sends focused edit requests to Claude with revision history, attachments, device previews, Monaco editing, and export support.
+MyMake is a personal AI-powered UI editor for uploaded React frontend projects. It accepts a zipped frontend app, spins up a live preview runner, lets you pick elements directly in the preview, and sends focused edit requests to Claude with revision history, attachments, device previews, Monaco editing, and export support.
 
 ## Stack
 
@@ -31,11 +31,11 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000/auth`, unlock the app with your passcode, and upload a `.zip` containing a single Next.js frontend project.
+Open `http://localhost:3000/auth`, unlock the app with your passcode, and upload a `.zip` containing a single Next.js or Vite React frontend project.
 
 ## What v1 Supports
 
-- Single uploaded Next.js frontend repos with local assets
+- Single uploaded Next.js or Vite React frontend repos with local assets
 - Live iframe preview with desktop, tablet, and mobile sizes
 - Element picking from the rendered preview
 - AI edits with optional image/file attachments

@@ -3,6 +3,8 @@ import { createServer } from "node:net";
 import path from "node:path";
 
 import { getDb } from "@/lib/server/db";
+import { detectProjectRuntime } from "@/lib/server/project-validation";
+import type { PackageManager } from "@/lib/types";
 
 type RunnerStatus = "starting" | "ready" | "error";
 
@@ -80,11 +82,18 @@ async function waitForRunner(targetUrl: string): Promise<void> {
 async function loadProject(projectId: string) {
   const row = getDb()
     .prepare(
-      `SELECT id, extracted_path, preview_port
+      `SELECT id, extracted_path, package_manager, preview_port
          FROM projects
         WHERE id = ?`,
     )
-    .get(projectId) as { id: string; extracted_path: string; preview_port: number | null } | undefined;
+    .get(projectId) as
+    | {
+        id: string;
+        extracted_path: string;
+        package_manager: PackageManager;
+        preview_port: number | null;
+      }
+    | undefined;
 
   if (!row) {
     throw new Error("Project not found.");
@@ -93,7 +102,7 @@ async function loadProject(projectId: string) {
   return row;
 }
 
-function runnerCommandArgs(projectDir: string, port: number): string[] {
+function nextRunnerCommandArgs(projectDir: string, port: number): string[] {
   return [
     path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"),
     path.join(process.cwd(), "scripts", "project-preview-runner.ts"),
@@ -102,6 +111,62 @@ function runnerCommandArgs(projectDir: string, port: number): string[] {
     "--port",
     String(port),
   ];
+}
+
+async function getRunnerSpec(
+  projectDir: string,
+  packageManager: PackageManager,
+  port: number,
+): Promise<{
+  command: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+}> {
+  const runtime = await detectProjectRuntime(projectDir);
+  if (runtime === "next") {
+    return {
+      command: process.execPath,
+      args: nextRunnerCommandArgs(projectDir, port),
+      env: {
+        ...process.env,
+        NODE_ENV: "development",
+      },
+    };
+  }
+
+  if (runtime === "vite") {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      NODE_ENV: "development",
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      BROWSER: "none",
+    };
+
+    if (packageManager === "pnpm") {
+      return {
+        command: "pnpm",
+        args: ["dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+        env,
+      };
+    }
+
+    if (packageManager === "yarn") {
+      return {
+        command: "yarn",
+        args: ["dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+        env,
+      };
+    }
+
+    return {
+      command: "npm",
+      args: ["run", "dev", "--", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+      env,
+    };
+  }
+
+  throw new Error("Unsupported preview runtime for this project.");
 }
 
 export async function stopPreviewRunner(projectId: string): Promise<void> {
@@ -145,13 +210,11 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
   const project = await loadProject(projectId);
   const port = project.preview_port || (await getAvailablePort());
   const targetUrl = `http://127.0.0.1:${port}`;
+  const runnerSpec = await getRunnerSpec(project.extracted_path, project.package_manager, port);
 
-  const child = spawn(process.execPath, runnerCommandArgs(project.extracted_path, port), {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      NODE_ENV: "development",
-    },
+  const child = spawn(runnerSpec.command, runnerSpec.args, {
+    cwd: project.extracted_path,
+    env: runnerSpec.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
 

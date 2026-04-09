@@ -176,7 +176,7 @@ const previewDocumentProxy = createProxyMiddleware<Request, Response>({
                 <div class="card">
                   <h1 style="margin: 0 0 12px; font-size: 18px;">Starting preview…</h1>
                   <p style="margin: 0; line-height: 1.7; color: #94a3b8;">
-                    MyMake is warming up the uploaded Next.js runner. This frame will refresh automatically.
+                    MyMake is warming up the uploaded frontend preview runner. This frame will refresh automatically.
                   </p>
                 </div>
               </body>

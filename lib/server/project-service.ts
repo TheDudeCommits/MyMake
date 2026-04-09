@@ -18,6 +18,7 @@ import {
 import { ensurePreviewRunner, restartPreviewRunner } from "@/lib/server/preview-manager";
 import {
   detectPackageManager,
+  normalizeImportedProject,
   validateProjectDirectory,
 } from "@/lib/server/project-validation";
 import {
@@ -52,6 +53,9 @@ const CONFIG_RESTART_FILES = new Set([
   "tailwind.config.js",
   "tailwind.config.ts",
   "tsconfig.json",
+  "vite.config.js",
+  "vite.config.mjs",
+  "vite.config.ts",
   "yarn.lock",
 ]);
 
@@ -232,6 +236,15 @@ function defaultFileCandidates(files: string[]): string[] {
     "pages/index.jsx",
     "app/layout.tsx",
     "app/globals.css",
+    "src/app/App.tsx",
+    "src/app/App.jsx",
+    "src/App.tsx",
+    "src/App.jsx",
+    "src/main.tsx",
+    "src/main.jsx",
+    "src/styles/theme.css",
+    "src/styles/index.css",
+    "index.html",
   ];
 
   const chosen = priorities.filter((candidate) => files.includes(candidate));
@@ -254,7 +267,23 @@ async function readFileIfText(projectDir: string, relativePath: string): Promise
 function getRouteCandidates(route: string): string[] {
   const normalizedRoute = route === "/" ? "" : route.replace(/^\/+|\/+$/g, "");
   const parts = normalizedRoute ? normalizedRoute.split("/") : [];
-  const candidates = ["app/layout.tsx", "app/globals.css", "pages/_app.tsx"];
+  const candidates = [
+    "app/layout.tsx",
+    "app/globals.css",
+    "pages/_app.tsx",
+    "src/app/App.tsx",
+    "src/app/App.jsx",
+    "src/App.tsx",
+    "src/App.jsx",
+    "src/main.tsx",
+    "src/main.jsx",
+    "src/routes.ts",
+    "src/routes.tsx",
+    "src/styles/theme.css",
+    "src/styles/index.css",
+    "src/styles/tailwind.css",
+    "index.html",
+  ];
 
   if (!parts.length) {
     candidates.push("app/page.tsx", "pages/index.tsx");
@@ -298,7 +327,7 @@ async function collectContextFiles(
         score += 90;
       }
 
-      if (file.startsWith("components/")) {
+      if (file.startsWith("components/") || file.includes("/components/")) {
         score += 15;
       }
 
@@ -538,6 +567,7 @@ export async function createProjectFromUpload(
   }
 
   await fs.cp(unpackDir, projectPaths.current, { recursive: true, force: true });
+  await normalizeImportedProject(projectPaths.current);
 
   const packageManager = await detectPackageManager(projectPaths.current);
   const insertedProject: ProjectRecord = {

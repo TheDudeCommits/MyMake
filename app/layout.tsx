@@ -17,7 +17,7 @@ const geistMono = localFont({
 
 export const metadata: Metadata = {
   title: "MyMake",
-  description: "A personal AI-powered UI editor for uploaded Next.js designs.",
+  description: "A personal AI-powered UI editor for uploaded React frontend designs.",
 };
 
 export default function RootLayout({
