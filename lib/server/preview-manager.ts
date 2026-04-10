@@ -19,6 +19,7 @@ interface PreviewRunnerState {
 interface PreviewRuntimeState {
   activeProjectId: string | null;
   runners: Map<string, PreviewRunnerState>;
+  startPromises: Map<string, Promise<PreviewRunnerState>>;
 }
 
 declare global {
@@ -31,6 +32,7 @@ function getRuntimeState(): PreviewRuntimeState {
     global.__MYMAKE_PREVIEW_RUNTIME__ = {
       activeProjectId: null,
       runners: new Map(),
+      startPromises: new Map(),
     };
   }
 
@@ -171,6 +173,7 @@ async function getRunnerSpec(
 
 export async function stopPreviewRunner(projectId: string): Promise<void> {
   const runtime = getRuntimeState();
+  runtime.startPromises.delete(projectId);
   const runner = runtime.runners.get(projectId);
   if (!runner) {
     return;
@@ -198,67 +201,79 @@ export async function stopPreviewRunner(projectId: string): Promise<void> {
 
 export async function ensurePreviewRunner(projectId: string): Promise<PreviewRunnerState> {
   const runtime = getRuntimeState();
+  const pendingStart = runtime.startPromises.get(projectId);
+  if (pendingStart) {
+    return pendingStart;
+  }
+
   const existing = runtime.runners.get(projectId);
   if (existing && existing.status !== "error" && !existing.process.killed) {
     return existing;
   }
 
-  if (runtime.activeProjectId && runtime.activeProjectId !== projectId) {
-    await stopPreviewRunner(runtime.activeProjectId);
-  }
-
-  const project = await loadProject(projectId);
-  await normalizeImportedProject(project.extracted_path);
-  const port = project.preview_port || (await getAvailablePort());
-  const targetUrl = `http://127.0.0.1:${port}`;
-  const runnerSpec = await getRunnerSpec(project.extracted_path, project.package_manager, port);
-
-  const child = spawn(runnerSpec.command, runnerSpec.args, {
-    cwd: project.extracted_path,
-    env: runnerSpec.env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  const runner: PreviewRunnerState = {
-    projectId,
-    port,
-    targetUrl,
-    status: "starting",
-    process: child,
-  };
-
-  runtime.runners.set(projectId, runner);
-  runtime.activeProjectId = projectId;
-
-  child.stdout?.on("data", (chunk) => {
-    process.stdout.write(`[preview:${projectId}] ${chunk}`);
-  });
-  child.stderr?.on("data", (chunk) => {
-    process.stderr.write(`[preview:${projectId}] ${chunk}`);
-  });
-  child.once("exit", () => {
-    runtime.runners.delete(projectId);
-    if (runtime.activeProjectId === projectId) {
-      runtime.activeProjectId = null;
+  const startPromise = (async () => {
+    if (runtime.activeProjectId && runtime.activeProjectId !== projectId) {
+      await stopPreviewRunner(runtime.activeProjectId);
     }
-  });
 
-  try {
-    await waitForRunner(targetUrl);
-    runner.status = "ready";
-    getDb()
-      .prepare(
-        `UPDATE projects
-            SET preview_port = ?, status = ?, last_opened_at = ?
-          WHERE id = ?`,
-      )
-      .run(port, "ready", new Date().toISOString(), projectId);
-    return runner;
-  } catch (error) {
-    runner.status = "error";
-    await stopPreviewRunner(projectId);
-    throw error;
-  }
+    const project = await loadProject(projectId);
+    await normalizeImportedProject(project.extracted_path);
+    const port = project.preview_port || (await getAvailablePort());
+    const targetUrl = `http://127.0.0.1:${port}`;
+    const runnerSpec = await getRunnerSpec(project.extracted_path, project.package_manager, port);
+
+    const child = spawn(runnerSpec.command, runnerSpec.args, {
+      cwd: project.extracted_path,
+      env: runnerSpec.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const runner: PreviewRunnerState = {
+      projectId,
+      port,
+      targetUrl,
+      status: "starting",
+      process: child,
+    };
+
+    runtime.runners.set(projectId, runner);
+    runtime.activeProjectId = projectId;
+
+    child.stdout?.on("data", (chunk) => {
+      process.stdout.write(`[preview:${projectId}] ${chunk}`);
+    });
+    child.stderr?.on("data", (chunk) => {
+      process.stderr.write(`[preview:${projectId}] ${chunk}`);
+    });
+    child.once("exit", () => {
+      runtime.runners.delete(projectId);
+      if (runtime.activeProjectId === projectId) {
+        runtime.activeProjectId = null;
+      }
+    });
+
+    try {
+      await waitForRunner(targetUrl);
+      runner.status = "ready";
+      getDb()
+        .prepare(
+          `UPDATE projects
+              SET preview_port = ?, status = ?, last_opened_at = ?
+            WHERE id = ?`,
+        )
+        .run(port, "ready", new Date().toISOString(), projectId);
+      return runner;
+    } catch (error) {
+      runner.status = "error";
+      await stopPreviewRunner(projectId);
+      throw error;
+    } finally {
+      runtime.startPromises.delete(projectId);
+    }
+  })();
+
+  runtime.startPromises.set(projectId, startPromise);
+  return startPromise;
 }
 
 export async function restartPreviewRunner(projectId: string): Promise<void> {
