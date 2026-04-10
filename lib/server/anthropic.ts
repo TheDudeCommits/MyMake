@@ -37,14 +37,99 @@ function getAnthropicClient(): Anthropic {
   return new Anthropic({ apiKey: anthropicApiKey });
 }
 
-function extractJsonFromText(value: string): unknown {
-  const trimmed = value.trim();
-  const withoutFence = trimmed
+function stripMarkdownFence(value: string): string {
+  return value
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
-    .replace(/\s*```$/i, "");
+    .replace(/\s*```$/i, "")
+    .trim();
+}
 
-  return JSON.parse(withoutFence);
+function findFirstParsableJson(value: string): unknown | null {
+  for (let startIndex = 0; startIndex < value.length; startIndex += 1) {
+    const startCharacter = value[startIndex];
+    if (startCharacter !== "{" && startCharacter !== "[") {
+      continue;
+    }
+
+    const endCharacter = startCharacter === "{" ? "}" : "]";
+    let depth = 0;
+    let inString = false;
+    let isEscaped = false;
+
+    for (let index = startIndex; index < value.length; index += 1) {
+      const character = value[index];
+
+      if (inString) {
+        if (isEscaped) {
+          isEscaped = false;
+          continue;
+        }
+
+        if (character === "\\") {
+          isEscaped = true;
+          continue;
+        }
+
+        if (character === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (character === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (character === startCharacter) {
+        depth += 1;
+        continue;
+      }
+
+      if (character !== endCharacter) {
+        continue;
+      }
+
+      depth -= 1;
+      if (depth !== 0) {
+        continue;
+      }
+
+      const candidate = value.slice(startIndex, index + 1);
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        break;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractJsonFromText(value: string): unknown {
+  const trimmed = value.trim();
+  const candidates = Array.from(new Set([trimmed, stripMarkdownFence(trimmed)]));
+
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      const embeddedJson = findFirstParsableJson(candidate);
+      if (embeddedJson !== null) {
+        return embeddedJson;
+      }
+    }
+  }
+
+  throw new Error(
+    `Claude returned a response that was not valid JSON. Received: ${trimmed.slice(0, 180)}`,
+  );
 }
 
 export async function requestAiEdit(params: {
@@ -62,6 +147,7 @@ export async function requestAiEdit(params: {
   const systemPrompt = [
     "You are MyMake, an expert UI editor that updates uploaded React frontend code.",
     "Return JSON only.",
+    "Start the response immediately with { and end it immediately with }.",
     'Use this exact shape: {"summary":"...", "warnings":["..."], "changedFiles":[{"path":"relative/path.tsx","content":"full file contents","reason":"optional"}]}',
     "Always return full file contents for every changed file.",
     "Prefer minimal, local edits that preserve the project architecture.",

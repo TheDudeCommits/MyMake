@@ -345,8 +345,20 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       }
 
       if (event.data.type === "MYMAKE_SELECT") {
-        setSelectedElement(event.data.payload as SelectionPayload);
-        setCurrentRoute(event.data.payload?.route || "/");
+        const payload = event.data.payload as SelectionPayload;
+        setSelectedElement(payload);
+        setCurrentRoute(payload?.route || "/");
+        setIsPicking(false);
+        setFeedback(
+          payload
+            ? `Selected ${payload.tagName.toLowerCase()} on ${payload.route}.`
+            : "Selected element is ready for the next AI edit.",
+        );
+        return;
+      }
+
+      if (event.data.type === "MYMAKE_PICKING") {
+        setIsPicking(Boolean(event.data.payload?.enabled));
         return;
       }
 

@@ -13,6 +13,7 @@ export function buildPreviewBridgeScript(projectId: string): string {
       const OVERLAY_ID = "__mymake_overlay__";
       let isPicking = false;
       let selectedElement = null;
+      let suppressClickUntil = 0;
 
       function getPreviewRoute() {
         const parts = window.location.pathname.split("/").filter(Boolean);
@@ -107,6 +108,20 @@ export function buildPreviewBridgeScript(projectId: string): string {
         window.parent.postMessage({ channel: CHANNEL, type, payload }, "*");
       }
 
+      function setPicking(nextValue) {
+        isPicking = Boolean(nextValue);
+        emit("MYMAKE_PICKING", { enabled: isPicking });
+      }
+
+      function isSelectableElement(value) {
+        return (
+          value instanceof Element &&
+          value.id !== OVERLAY_ID &&
+          value !== document.documentElement &&
+          value !== document.body
+        );
+      }
+
       function currentSelectionPayload(element) {
         const rect = element.getBoundingClientRect();
         return {
@@ -132,6 +147,7 @@ export function buildPreviewBridgeScript(projectId: string): string {
       function selectElement(element) {
         selectedElement = element;
         updateOverlay(element);
+        setPicking(false);
         emit("MYMAKE_SELECT", currentSelectionPayload(element));
       }
 
@@ -147,6 +163,9 @@ export function buildPreviewBridgeScript(projectId: string): string {
             if (overlay && !selectedElement) {
               overlay.style.display = "none";
             }
+            if (selectedElement) {
+              updateOverlay(selectedElement);
+            }
           }
         }
 
@@ -159,9 +178,9 @@ export function buildPreviewBridgeScript(projectId: string): string {
       });
 
       document.addEventListener(
-        "mousemove",
+        "pointermove",
         (event) => {
-          if (!isPicking || !(event.target instanceof Element)) {
+          if (!isPicking || !isSelectableElement(event.target)) {
             return;
           }
 
@@ -171,15 +190,32 @@ export function buildPreviewBridgeScript(projectId: string): string {
       );
 
       document.addEventListener(
-        "click",
+        "pointerdown",
         (event) => {
-          if (!isPicking || !(event.target instanceof Element)) {
+          if (!isPicking || !isSelectableElement(event.target)) {
             return;
           }
 
           event.preventDefault();
           event.stopPropagation();
+          event.stopImmediatePropagation();
+          suppressClickUntil = Date.now() + 600;
           selectElement(event.target);
+        },
+        true,
+      );
+
+      document.addEventListener(
+        "click",
+        (event) => {
+          if (Date.now() >= suppressClickUntil) {
+            return;
+          }
+
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+          suppressClickUntil = 0;
         },
         true,
       );

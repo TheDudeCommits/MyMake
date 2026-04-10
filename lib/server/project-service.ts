@@ -184,11 +184,12 @@ async function runCommand(
   args: string[],
   cwd: string,
   label: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: process.env,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -214,18 +215,36 @@ async function runCommand(
   });
 }
 
+function installEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    NODE_ENV: "development",
+    npm_config_production: "false",
+    NPM_CONFIG_PRODUCTION: "false",
+    YARN_PRODUCTION: "false",
+  };
+}
+
 async function installDependencies(projectDir: string, packageManager: PackageManager): Promise<void> {
+  const env = installEnvironment();
+
   if (packageManager === "pnpm") {
-    await runCommand("pnpm", ["install"], projectDir, "pnpm install");
+    await runCommand("pnpm", ["install", "--prod=false"], projectDir, "pnpm install", env);
     return;
   }
 
   if (packageManager === "yarn") {
-    await runCommand("yarn", ["install"], projectDir, "yarn install");
+    await runCommand(
+      "yarn",
+      ["install", "--production=false"],
+      projectDir,
+      "yarn install",
+      env,
+    );
     return;
   }
 
-  await runCommand("npm", ["install"], projectDir, "npm install");
+  await runCommand("npm", ["install", "--include=dev"], projectDir, "npm install", env);
 }
 
 function defaultFileCandidates(files: string[]): string[] {
