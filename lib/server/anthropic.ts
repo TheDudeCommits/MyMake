@@ -8,18 +8,16 @@ import type {
   SelectionPayload,
 } from "@/lib/types";
 
+const changedFileSchema = z.object({
+  path: z.string().min(1),
+  content: z.string(),
+  reason: z.string().optional(),
+});
+
 const aiResponseSchema = z.object({
   summary: z.string().min(1),
   warnings: z.array(z.string()).default([]),
-  changedFiles: z
-    .array(
-      z.object({
-        path: z.string().min(1),
-        content: z.string(),
-        reason: z.string().optional(),
-      }),
-    )
-    .min(1),
+  changedFiles: z.array(changedFileSchema).min(1),
 });
 
 export interface ContextFile {
@@ -132,6 +130,46 @@ function extractJsonFromText(value: string): unknown {
   );
 }
 
+function normalizeAiResponseShape(value: unknown): z.infer<typeof aiResponseSchema> {
+  const changedFilesOnly = z.array(changedFileSchema).safeParse(value);
+  if (changedFilesOnly.success) {
+    return {
+      summary: "Applied the requested code update.",
+      warnings: [],
+      changedFiles: changedFilesOnly.data,
+    };
+  }
+
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const candidate = value as Record<string, unknown>;
+    const summary =
+      typeof candidate.summary === "string" && candidate.summary.trim()
+        ? candidate.summary.trim()
+        : typeof candidate.message === "string" && candidate.message.trim()
+          ? candidate.message.trim()
+          : typeof candidate.explanation === "string" && candidate.explanation.trim()
+            ? candidate.explanation.trim()
+            : "Applied the requested code update.";
+
+    const warnings = Array.isArray(candidate.warnings)
+      ? candidate.warnings.filter((item): item is string => typeof item === "string")
+      : [];
+
+    for (const key of ["changedFiles", "files", "changes", "edits", "updatedFiles"]) {
+      const parsedFiles = z.array(changedFileSchema).safeParse(candidate[key]);
+      if (parsedFiles.success) {
+        return {
+          summary,
+          warnings,
+          changedFiles: parsedFiles.data,
+        };
+      }
+    }
+  }
+
+  return aiResponseSchema.parse(value);
+}
+
 export async function requestAiEdit(params: {
   prompt: string;
   selection: SelectionPayload | null;
@@ -218,6 +256,6 @@ export async function requestAiEdit(params: {
     .map((item) => item.text)
     .join("\n");
 
-  const parsed = aiResponseSchema.parse(extractJsonFromText(responseText));
+  const parsed = normalizeAiResponseShape(extractJsonFromText(responseText));
   return parsed;
 }
