@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import path from "node:path";
 
 import { getDb } from "@/lib/server/db";
-import { detectProjectRuntime } from "@/lib/server/project-validation";
+import { detectProjectRuntime, normalizeImportedProject } from "@/lib/server/project-validation";
 import type { PackageManager } from "@/lib/types";
 
 type RunnerStatus = "starting" | "ready" | "error";
@@ -208,6 +208,7 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
   }
 
   const project = await loadProject(projectId);
+  await normalizeImportedProject(project.extracted_path);
   const port = project.preview_port || (await getAvailablePort());
   const targetUrl = `http://127.0.0.1:${port}`;
   const runnerSpec = await getRunnerSpec(project.extracted_path, project.package_manager, port);

@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import ts from "typescript";
 
 import type { PackageManager, ProjectRuntime } from "@/lib/types";
 
@@ -48,6 +49,8 @@ const TEXT_SOURCE_EXTENSIONS = new Set([
   ".tsx",
 ]);
 
+const ROUTER_PREVIEW_BASENAME_HELPER = "__MYMAKE_PREVIEW_BASENAME__";
+
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
     await fs.access(targetPath);
@@ -89,6 +92,248 @@ function collectManifestDependencies(manifest: ProjectManifest): Record<string, 
     ...(manifest.devDependencies || {}),
     ...(manifest.peerDependencies || {}),
   };
+}
+
+function hasJsLikeExtension(filePath: string): boolean {
+  return [".js", ".jsx", ".ts", ".tsx"].includes(path.extname(filePath).toLowerCase());
+}
+
+function scriptKindForPath(filePath: string): ts.ScriptKind {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === ".tsx") {
+    return ts.ScriptKind.TSX;
+  }
+
+  if (extension === ".jsx") {
+    return ts.ScriptKind.JSX;
+  }
+
+  if (extension === ".js" || extension === ".mjs") {
+    return ts.ScriptKind.JS;
+  }
+
+  return ts.ScriptKind.TS;
+}
+
+function isIdentifierNamed(
+  node: ts.Node | undefined,
+  expected: string,
+): node is ts.Identifier {
+  return Boolean(node && ts.isIdentifier(node) && node.text === expected);
+}
+
+function isBrowserRouterTagName(tagName: ts.JsxTagNameExpression): boolean {
+  return ts.isIdentifier(tagName) && tagName.text === "BrowserRouter";
+}
+
+function buildPreviewBasenameValue() {
+  return ts.factory.createBinaryExpression(
+    ts.factory.createCallExpression(
+      ts.factory.createPropertyAccessExpression(ts.factory.createIdentifier("Reflect"), "get"),
+      undefined,
+      [ts.factory.createIdentifier("globalThis"), ts.factory.createStringLiteral(ROUTER_PREVIEW_BASENAME_HELPER)],
+    ),
+    ts.SyntaxKind.BarBarToken,
+    ts.factory.createIdentifier("undefined"),
+  );
+}
+
+function buildPreviewBasenameHelperStatement() {
+  return ts.factory.createVariableStatement(
+    undefined,
+    ts.factory.createVariableDeclarationList(
+      [
+        ts.factory.createVariableDeclaration(
+          ROUTER_PREVIEW_BASENAME_HELPER,
+          undefined,
+          undefined,
+          buildPreviewBasenameValue(),
+        ),
+      ],
+      ts.NodeFlags.Const,
+    ),
+  );
+}
+
+function hasBasenameProperty(node: ts.ObjectLiteralExpression): boolean {
+  return node.properties.some(
+    (property) =>
+      ts.isPropertyAssignment(property) &&
+      ((ts.isIdentifier(property.name) && property.name.text === "basename") ||
+        (ts.isStringLiteral(property.name) && property.name.text === "basename")),
+  );
+}
+
+function addBasenameToBrowserRouterAttributes(
+  attributes: ts.JsxAttributes,
+): ts.JsxAttributes {
+  if (
+    attributes.properties.some(
+      (property) =>
+        ts.isJsxAttribute(property) &&
+        ts.isIdentifier(property.name) &&
+        property.name.text === "basename",
+    )
+  ) {
+    return attributes;
+  }
+
+  return ts.factory.updateJsxAttributes(attributes, [
+    ...attributes.properties,
+    ts.factory.createJsxAttribute(
+      ts.factory.createIdentifier("basename"),
+      ts.factory.createJsxExpression(undefined, ts.factory.createIdentifier(ROUTER_PREVIEW_BASENAME_HELPER)),
+    ),
+  ]);
+}
+
+function patchCreateBrowserRouterCall(node: ts.CallExpression): ts.CallExpression {
+  const basenameProperty = ts.factory.createPropertyAssignment(
+    "basename",
+    ts.factory.createIdentifier(ROUTER_PREVIEW_BASENAME_HELPER),
+  );
+
+  if (!node.arguments.length) {
+    return ts.factory.updateCallExpression(node, node.expression, node.typeArguments, [
+      ts.factory.createArrayLiteralExpression(),
+      ts.factory.createObjectLiteralExpression([basenameProperty], true),
+    ]);
+  }
+
+  if (node.arguments.length === 1) {
+    return ts.factory.updateCallExpression(node, node.expression, node.typeArguments, [
+      node.arguments[0],
+      ts.factory.createObjectLiteralExpression([basenameProperty], true),
+    ]);
+  }
+
+  const [firstArgument, secondArgument, ...rest] = node.arguments;
+  if (ts.isObjectLiteralExpression(secondArgument)) {
+    if (hasBasenameProperty(secondArgument)) {
+      return node;
+    }
+
+    return ts.factory.updateCallExpression(node, node.expression, node.typeArguments, [
+      firstArgument,
+      ts.factory.updateObjectLiteralExpression(secondArgument, [
+        ...secondArgument.properties,
+        basenameProperty,
+      ]),
+      ...rest,
+    ]);
+  }
+
+  return ts.factory.updateCallExpression(node, node.expression, node.typeArguments, [
+    firstArgument,
+    ts.factory.createCallExpression(
+      ts.factory.createPropertyAccessExpression(ts.factory.createIdentifier("Object"), "assign"),
+      undefined,
+      [
+        ts.factory.createObjectLiteralExpression(),
+        secondArgument,
+        ts.factory.createObjectLiteralExpression([basenameProperty], true),
+      ],
+    ),
+    ...rest,
+  ]);
+}
+
+function applyPreviewRouterCompatibility(sourceText: string, filePath: string): string {
+  if (
+    !hasJsLikeExtension(filePath) ||
+    (!sourceText.includes("createBrowserRouter") && !sourceText.includes("BrowserRouter"))
+  ) {
+    return sourceText;
+  }
+
+  const sourceFile = ts.createSourceFile(
+    filePath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindForPath(filePath),
+  );
+
+  let changed = false;
+  let needsHelper = false;
+
+  const transformer: ts.TransformerFactory<ts.SourceFile> = (context) => {
+    const visit: ts.Visitor = (node) => {
+      if (
+        ts.isCallExpression(node) &&
+        (isIdentifierNamed(node.expression, "createBrowserRouter") ||
+          (ts.isPropertyAccessExpression(node.expression) &&
+            isIdentifierNamed(node.expression.name, "createBrowserRouter")))
+      ) {
+        const updated = patchCreateBrowserRouterCall(node);
+        if (updated !== node) {
+          changed = true;
+          needsHelper = true;
+        }
+        return updated;
+      }
+
+      if (ts.isJsxSelfClosingElement(node) && isBrowserRouterTagName(node.tagName)) {
+        const updatedAttributes = addBasenameToBrowserRouterAttributes(node.attributes);
+        if (updatedAttributes !== node.attributes) {
+          changed = true;
+          needsHelper = true;
+          return ts.factory.updateJsxSelfClosingElement(
+            node,
+            node.tagName,
+            node.typeArguments,
+            updatedAttributes,
+          );
+        }
+      }
+
+      if (ts.isJsxOpeningElement(node) && isBrowserRouterTagName(node.tagName)) {
+        const updatedAttributes = addBasenameToBrowserRouterAttributes(node.attributes);
+        if (updatedAttributes !== node.attributes) {
+          changed = true;
+          needsHelper = true;
+          return ts.factory.updateJsxOpeningElement(
+            node,
+            node.tagName,
+            node.typeArguments,
+            updatedAttributes,
+          );
+        }
+      }
+
+      return ts.visitEachChild(node, visit, context);
+    };
+
+    return (node) => ts.visitNode(node, visit) as ts.SourceFile;
+  };
+
+  const transformed = ts.transform(sourceFile, [transformer]);
+  const nextSourceFile = transformed.transformed[0];
+
+  let outputSource = nextSourceFile;
+  if (changed && needsHelper && !sourceText.includes(`const ${ROUTER_PREVIEW_BASENAME_HELPER}`)) {
+    const statements = [...nextSourceFile.statements];
+    let insertIndex = 0;
+    while (
+      insertIndex < statements.length &&
+      (ts.isImportDeclaration(statements[insertIndex]) ||
+        ts.isImportEqualsDeclaration(statements[insertIndex]))
+    ) {
+      insertIndex += 1;
+    }
+
+    outputSource = ts.factory.updateSourceFile(nextSourceFile, [
+      ...statements.slice(0, insertIndex),
+      buildPreviewBasenameHelperStatement(),
+      ...statements.slice(insertIndex),
+    ]);
+  }
+
+  const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
+  const nextContent = printer.printFile(outputSource);
+  transformed.dispose();
+
+  return changed ? nextContent : sourceText;
 }
 
 export async function detectProjectRuntime(projectDir: string): Promise<ProjectRuntime | null> {
@@ -178,8 +423,9 @@ export async function normalizeImportedProject(projectDir: string): Promise<void
       return relativeAssetPath.startsWith(".") ? relativeAssetPath : `./${relativeAssetPath}`;
     });
 
-    if (nextContent !== originalContent) {
-      await fs.writeFile(absolutePath, nextContent, "utf8");
+    const routerCompatibleContent = applyPreviewRouterCompatibility(nextContent, absolutePath);
+    if (routerCompatibleContent !== originalContent) {
+      await fs.writeFile(absolutePath, routerCompatibleContent, "utf8");
     }
   }
 }

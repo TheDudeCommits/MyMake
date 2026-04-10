@@ -1,3 +1,10 @@
+export function buildPreviewBootstrapScript(projectId: string): string {
+  return `
+    window.__MYMAKE_PREVIEW_PROJECT_ID__ = ${JSON.stringify(projectId)};
+    window.__MYMAKE_PREVIEW_BASENAME__ = ${JSON.stringify(`/preview/${projectId}`)};
+  `;
+}
+
 export function buildPreviewBridgeScript(projectId: string): string {
   return `
     (() => {

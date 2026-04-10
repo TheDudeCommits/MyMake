@@ -7,7 +7,10 @@ import type { Socket } from "node:net";
 
 import { isAuthorizedCookieValue } from "@/lib/server/auth";
 import { getEnv } from "@/lib/server/env";
-import { buildPreviewBridgeScript } from "@/lib/server/preview-bridge";
+import {
+  buildPreviewBootstrapScript,
+  buildPreviewBridgeScript,
+} from "@/lib/server/preview-bridge";
 import {
   ensurePreviewRunner,
   getActivePreviewProjectId,
@@ -51,6 +54,23 @@ function getProjectIdFromReferer(referer: string | string[] | undefined): string
   }
 }
 
+function isPreviewAssetPath(pathname = ""): boolean {
+  return (
+    pathname === "/vite.svg" ||
+    pathname === "/@vite/client" ||
+    pathname === "/@react-refresh" ||
+    pathname.startsWith("/src/") ||
+    pathname.startsWith("/assets/") ||
+    pathname.startsWith("/node_modules/") ||
+    pathname.startsWith("/@id/") ||
+    pathname.startsWith("/@fs/")
+  );
+}
+
+function isPreviewWebSocketPath(url = ""): boolean {
+  return url.startsWith("/?token=");
+}
+
 function getCookieValue(
   cookieHeader: string | string[] | undefined,
   name: string,
@@ -72,12 +92,17 @@ function getCookieValue(
 }
 
 function injectPreviewBridge(html: string, projectId: string): string {
+  const bootstrap = `<script>${buildPreviewBootstrapScript(projectId)}</script>`;
   const bridge = `<script>${buildPreviewBridgeScript(projectId)}</script>`;
-  if (html.includes("</body>")) {
-    return html.replace("</body>", `${bridge}</body>`);
+  const withBootstrap = html.includes("</head>")
+    ? html.replace("</head>", `${bootstrap}</head>`)
+    : `${bootstrap}${html}`;
+
+  if (withBootstrap.includes("</body>")) {
+    return withBootstrap.replace("</body>", `${bridge}</body>`);
   }
 
-  return `${html}${bridge}`;
+  return `${withBootstrap}${bridge}`;
 }
 
 function rewritePreviewPath(pathname: string, projectId: string): string {
@@ -236,12 +261,15 @@ app.prepare().then(() => {
 
   server.use(async (req, res, nextFn) => {
     const refererProjectId = getProjectIdFromReferer(req.headers.referer);
-    if (!refererProjectId) {
+    const fallbackProjectId =
+      refererProjectId || (isPreviewAssetPath(req.path) ? getActivePreviewProjectId() : null);
+
+    if (!fallbackProjectId) {
       nextFn();
       return;
     }
 
-    req.mymakeProjectId = refererProjectId;
+    req.mymakeProjectId = fallbackProjectId;
     await dispatchPreviewProxy(req, res, nextFn);
   });
 
@@ -257,7 +285,7 @@ app.prepare().then(() => {
     const projectId =
       getProjectIdFromPath(req.url) ||
       getProjectIdFromReferer(req.headers.referer) ||
-      (req.url?.startsWith("/_next/webpack-hmr") ? getActivePreviewProjectId() : null);
+      (isPreviewWebSocketPath(req.url) ? getActivePreviewProjectId() : null);
     if (!projectId) {
       await handleUpgrade(req, socket, head);
       return;
