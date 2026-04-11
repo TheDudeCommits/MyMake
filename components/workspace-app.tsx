@@ -546,7 +546,15 @@ function HomeProjectCard({
         type="button"
         title={`Delete ${label}`}
         aria-label={`Delete ${label}`}
-        onClick={() => onDelete(project)}
+        onMouseDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onDelete(project);
+        }}
       >
         <Trash2 className="h-4 w-4" />
       </button>
@@ -648,29 +656,10 @@ function HomeDashboard({
               {error || feedback}
             </div>
           ) : null}
-
-          <div className="mt-auto rounded-[16px] border border-white/[0.06] bg-[#2b2c31] px-3 py-3 text-sm leading-6 text-slate-400">
-            Manage uploads, open any project, and remove the ones you no longer need from the recents grid.
-          </div>
         </aside>
 
         <section className="min-w-0 overflow-y-auto px-7 pb-8 pt-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2">
-              {["Design", "FigJam", "Slides", "Site", "Make"].map((item, index) => (
-                <span
-                  key={item}
-                  className={clsx(
-                    "rounded-full border px-3.5 py-1.5 text-sm",
-                    index === 4
-                      ? "border-[#5f62ff]/26 bg-[#5f62ff]/12 text-white"
-                      : "border-white/[0.08] bg-[#2f3034] text-slate-300",
-                  )}
-                >
-                  {item}
-                </span>
-              ))}
-            </div>
+          <div className="flex items-center justify-end gap-3">
             <button
               className="inline-flex h-10 items-center justify-center gap-2 rounded-[12px] border border-white/[0.08] bg-[#2f3034] px-4 text-sm font-medium text-white transition hover:bg-[#34363b]"
               type="button"
