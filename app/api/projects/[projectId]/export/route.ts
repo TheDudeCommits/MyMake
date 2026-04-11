@@ -1,4 +1,6 @@
-import fs from "node:fs/promises";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import { Readable } from "node:stream";
 
 import { NextResponse } from "next/server";
 
@@ -12,12 +14,17 @@ export async function GET(
 ) {
   try {
     const archivePath = await createProjectExport(params.projectId);
-    const fileBuffer = await fs.readFile(archivePath);
+    const stats = await fsp.stat(archivePath);
+    const nodeStream = fs.createReadStream(archivePath);
+    nodeStream.on("close", () => {
+      void fsp.rm(archivePath, { force: true }).catch(() => undefined);
+    });
 
-    return new NextResponse(fileBuffer, {
+    return new NextResponse(Readable.toWeb(nodeStream) as ReadableStream, {
       headers: {
         "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="${params.projectId}.zip"`,
+        "Content-Length": String(stats.size),
       },
     });
   } catch (error) {

@@ -150,7 +150,20 @@ export async function archiveDirectoryToFile(
     archive.on("error", reject);
 
     archive.pipe(output);
-    archive.directory(source, false);
+    archive.glob("**/*", {
+      cwd: source,
+      dot: true,
+      ignore: [
+        "node_modules/**",
+        ".next/**",
+        "__MACOSX/**",
+        ".DS_Store",
+        "dist/**",
+        "build/**",
+        ".turbo/**",
+        "coverage/**",
+      ],
+    });
     archive.finalize().catch(reject);
   });
 }
