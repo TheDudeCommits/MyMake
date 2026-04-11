@@ -36,9 +36,12 @@ import type {
   AiModelKey,
   AiModelOption,
   AttachmentRecord,
+  ConversationTurnRecord,
   DashboardSnapshot,
   DevicePreset,
+  EditMode,
   FileNode,
+  MakeKitRecord,
   ProjectRecord,
   ProjectWorkspace,
   RevisionRecord,
@@ -56,8 +59,11 @@ const DEVICE_PRESETS: Record<
 
 const DEVICE_ORDER: DevicePreset[] = ["desktop", "tablet", "mobile"];
 const AI_MODEL_STORAGE_KEY = "mymake-selected-ai-model";
+const EDIT_MODE_STORAGE_KEY = "mymake-selected-edit-mode";
 const EMPTY_REVISIONS: RevisionRecord[] = [];
 const EMPTY_ATTACHMENTS: AttachmentRecord[] = [];
+const EMPTY_TURNS: ConversationTurnRecord[] = [];
+const EMPTY_KITS: MakeKitRecord[] = [];
 const HOME_RESOURCE_CARDS = [
   {
     title: "Mobile Strategy Review",
@@ -164,6 +170,18 @@ function shortAiModelLabel(model: AiModelOption): string {
   return model.label;
 }
 
+function shortEditModeLabel(mode: EditMode): string {
+  if (mode === "precise") {
+    return "Precise";
+  }
+
+  if (mode === "scoped") {
+    return "Scoped";
+  }
+
+  return "Creative";
+}
+
 function checkpointLabel(revision: RevisionRecord): string {
   return `#${String(revision.sequence + 1).padStart(2, "0")}`;
 }
@@ -191,57 +209,36 @@ function selectedElementSummary(selection: SelectionPayload | null): string {
   );
 }
 
-function compactRevisionMessage(value: string): string {
-  let normalized = value.replace(/\s+/g, " ").trim();
-  const softCutMarkers = [
-    ", including ",
-    ", removing ",
-    ", while ",
-    ", across ",
-    ", throughout ",
-  ];
-
-  for (const marker of softCutMarkers) {
-    const index = normalized.toLowerCase().indexOf(marker);
-    if (index > 80) {
-      normalized = `${normalized.slice(0, index).trimEnd()}.`;
-      break;
-    }
+function turnStatusLabel(turn: ConversationTurnRecord): string {
+  if (turn.status === "failed") {
+    return "Failed";
   }
 
-  if (normalized.length > 150) {
-    const trimmed = normalized.slice(0, 147);
-    normalized = `${trimmed.slice(0, trimmed.lastIndexOf(" ")).trimEnd()}…`;
+  if (turn.warnings.length) {
+    return "Warning";
   }
 
-  return normalized;
+  if (turn.status === "applied") {
+    return "Applied";
+  }
+
+  return "Info";
 }
 
-function revisionSummaryText(revision: RevisionRecord): string {
-  const fallback =
-    revision.source === "upload"
-      ? "Imported the project and created the first working checkpoint."
-      : revision.source === "manual"
-        ? "Saved a manual code edit and synced the preview."
-        : revision.source === "undo"
-          ? "Moved back to an earlier checkpoint."
-          : revision.source === "redo"
-            ? "Moved forward to a later checkpoint."
-            : "Applied a new AI-assisted design change.";
-
-  return compactRevisionMessage(revision.summary || fallback);
-}
-
-function revisionPromptText(revision: RevisionRecord): string | null {
-  if (revision.source === "ai") {
-    return revision.label.trim();
+function turnStatusClasses(turn: ConversationTurnRecord): string {
+  if (turn.status === "failed") {
+    return "border-rose-300/20 bg-rose-300/10 text-rose-100";
   }
 
-  if (revision.source === "manual") {
-    return `Saved ${revision.label.replace(/^Saved\s+/i, "")}`.trim();
+  if (turn.warnings.length) {
+    return "border-amber-300/20 bg-amber-300/10 text-amber-100";
   }
 
-  return null;
+  if (turn.status === "applied") {
+    return "border-emerald-300/20 bg-emerald-300/10 text-emerald-100";
+  }
+
+  return "border-white/[0.08] bg-[#262628] text-slate-300";
 }
 
 function projectOptionLabel(project: ProjectRecord, duplicateNames: Map<string, number>): string {
@@ -762,6 +759,7 @@ function HomeDashboard({
 export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSnapshot }) {
   const [snapshot, setSnapshot] = useState(initialSnapshot);
   const [devicePreset, setDevicePreset] = useState<DevicePreset>("desktop");
+  const [editMode, setEditMode] = useState<EditMode>("scoped");
   const [isPicking, setIsPicking] = useState(false);
   const [isCodePanelOpen, setIsCodePanelOpen] = useState(false);
   const [selectedAiModelKey, setSelectedAiModelKey] = useState<AiModelKey>(
@@ -801,6 +799,8 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
   const currentProject = snapshot.currentProject;
   const revisions = currentProject?.revisions ?? EMPTY_REVISIONS;
+  const conversationTurns = currentProject?.conversationTurns ?? EMPTY_TURNS;
+  const kits = currentProject?.kits ?? EMPTY_KITS;
   const orderedRevisions = useMemo(
     () => [...revisions].sort((left, right) => left.sequence - right.sequence),
     [revisions],
@@ -844,6 +844,10 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     [currentProject?.project.currentRevisionId, revisions],
   );
   const currentCheckpointLabel = currentRevision ? checkpointLabel(currentRevision) : "Version 1";
+  const revisionById = useMemo(
+    () => new Map(revisions.map((revision) => [revision.id, revision])),
+    [revisions],
+  );
   const projectNameCounts = useMemo(() => {
     const counts = new Map<string, number>();
     snapshot.projects.forEach((project) => {
@@ -880,6 +884,17 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   }, [snapshot.aiModels]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const storedMode = window.localStorage.getItem(EDIT_MODE_STORAGE_KEY) as EditMode | null;
+    if (storedMode && ["precise", "scoped", "creative"].includes(storedMode)) {
+      setEditMode(storedMode);
+    }
+  }, []);
+
+  useEffect(() => {
     if (!snapshot.aiModels.some((model) => model.key === selectedAiModelKey && model.enabled)) {
       setSelectedAiModelKey(fallbackAiModelKey);
     }
@@ -892,6 +907,14 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     window.localStorage.setItem(AI_MODEL_STORAGE_KEY, selectedAiModelKey);
   }, [selectedAiModelKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(EDIT_MODE_STORAGE_KEY, editMode);
+  }, [editMode]);
 
   useEffect(() => {
     setEditorFilePath(currentProject?.currentFilePath || null);
@@ -1247,6 +1270,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           prompt,
           selection: selectedElement,
           attachmentIds: selectedAttachmentIds,
+          editMode,
           aiModelKey: selectedAiModel.key,
           currentFilePath: editorFilePath,
         }),
@@ -1636,6 +1660,64 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
                     {selectedElementSummary(selectedElement)}
                   </p>
+                  {selectedElement?.editableProperties?.length ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {selectedElement.editableProperties.slice(0, 5).map((item) => (
+                        <span
+                          key={item}
+                          className="rounded-full border border-white/[0.08] bg-[#262628] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-slate-400"
+                        >
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="rounded-[16px] border border-white/[0.08] bg-[#2f2d2c] px-3.5 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Active kits</p>
+                    <span className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                      {kits.filter((kit) => kit.enabled).length}
+                    </span>
+                  </div>
+                  <div className="mt-2 space-y-2">
+                    {kits.filter((kit) => kit.enabled).slice(0, 4).map((kit) => (
+                      <div key={kit.id} className="rounded-[12px] border border-white/[0.08] bg-[#262628] px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-300">
+                            {kit.name}
+                          </p>
+                          <span className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                            {kit.kind}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs leading-5 text-slate-400">{kit.summary}</p>
+                      </div>
+                    ))}
+                    {!kits.filter((kit) => kit.enabled).length ? (
+                      <p className="text-xs leading-5 text-slate-500">
+                        MyMake will populate kits as it learns this project’s runtime, style, and references.
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="rounded-[16px] border border-white/[0.08] bg-[#2f2d2c] px-3.5 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Context graph</p>
+                    <span className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                      {currentProject.latestContextSnapshot?.sources.length || 0} nodes
+                    </span>
+                  </div>
+                  <p className="mt-2 text-sm text-slate-100">
+                    {currentProject.latestContextSnapshot?.primaryTarget || "No context snapshot yet"}
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-slate-400">
+                    {currentProject.latestContextSnapshot?.compressedMemory
+                      ? currentProject.latestContextSnapshot.compressedMemory
+                      : "The next AI turn will capture route context, component subtree, kits, and recent edit memory."}
+                  </p>
                 </div>
 
                 <div>
@@ -1646,46 +1728,98 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
                   <div className="mt-3 space-y-3">
                     {currentProject ? (
-                      orderedRevisions.map((revision) => {
-                        const promptText = revisionPromptText(revision);
+                      conversationTurns.map((turn) => {
+                        const linkedRevision = turn.revisionId
+                          ? revisionById.get(turn.revisionId) || null
+                          : null;
                         const isCurrentCheckpoint =
-                          currentProject.project.currentRevisionId === revision.id;
+                          Boolean(
+                            linkedRevision &&
+                              currentProject.project.currentRevisionId === linkedRevision.id,
+                          );
 
                         return (
-                          <article key={revision.id} className="group space-y-2">
-                            {promptText ? (
+                          <article key={turn.id} className="group space-y-2">
+                            {turn.kind === "user" && turn.prompt ? (
                               <div className="flex justify-end">
                                 <div className="max-w-[88%] rounded-[18px] border border-[#5f62ff]/28 bg-[#5f62ff]/12 px-3.5 py-3 text-left">
-                                  <p className="text-sm leading-6 text-white">{promptText}</p>
+                                  <p className="text-sm leading-6 text-white">{turn.prompt}</p>
+                                  {turn.editMode ? (
+                                    <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-[#cfd1ff]">
+                                      {shortEditModeLabel(turn.editMode)}
+                                    </p>
+                                  ) : null}
                                 </div>
                               </div>
                             ) : null}
 
-                            <div className="rounded-[18px] border border-white/[0.08] bg-[#2f2d2c] px-3.5 py-3">
+                            {turn.kind !== "user" ? (
+                              <div className="rounded-[18px] border border-white/[0.08] bg-[#2f2d2c] px-3.5 py-3">
                               <div className="flex items-center justify-between gap-3">
-                                <span className="rounded-full border border-white/[0.08] bg-[#262628] px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-400">
-                                  {checkpointLabel(revision)}
-                                </span>
-                                {isCurrentCheckpoint ? (
-                                  <span className="text-[10px] uppercase tracking-[0.16em] text-emerald-200">
-                                    Current
-                                  </span>
-                                ) : (
-                                  <button
-                                    className="opacity-0 transition group-hover:opacity-100 text-slate-400 hover:text-white"
-                                    type="button"
-                                    title={`Restore ${checkpointLabel(revision)}`}
-                                    aria-label={`Restore ${checkpointLabel(revision)}`}
-                                    onClick={() => void handleRestoreRevision(revision)}
+                                <div className="flex items-center gap-2">
+                                  {linkedRevision ? (
+                                    <span className="rounded-full border border-white/[0.08] bg-[#262628] px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-400">
+                                      {checkpointLabel(linkedRevision)}
+                                    </span>
+                                  ) : null}
+                                  <span
+                                    className={clsx(
+                                      "rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.16em]",
+                                      turnStatusClasses(turn),
+                                    )}
                                   >
-                                    <RefreshCcw className="h-3.5 w-3.5" />
-                                  </button>
-                                )}
+                                    {turnStatusLabel(turn)}
+                                  </span>
+                                </div>
+                                {linkedRevision ? (
+                                  isCurrentCheckpoint ? (
+                                    <span className="text-[10px] uppercase tracking-[0.16em] text-emerald-200">
+                                      Current
+                                    </span>
+                                  ) : (
+                                    <button
+                                      className="opacity-0 transition group-hover:opacity-100 text-slate-400 hover:text-white"
+                                      type="button"
+                                      title={`Restore ${checkpointLabel(linkedRevision)}`}
+                                      aria-label={`Restore ${checkpointLabel(linkedRevision)}`}
+                                      onClick={() => void handleRestoreRevision(linkedRevision)}
+                                    >
+                                      <RefreshCcw className="h-3.5 w-3.5" />
+                                    </button>
+                                  )
+                                ) : null}
                               </div>
                               <p className="mt-2 text-sm leading-6 text-[#e7e7ea]">
-                                {revisionSummaryText(revision)}
+                                {turn.summary || "No summary available yet."}
                               </p>
+                              {turn.selectionTarget?.componentName || turn.selectionTarget?.sourceFilePath ? (
+                                <p className="mt-2 text-xs leading-5 text-slate-400">
+                                  {[
+                                    turn.selectionTarget?.componentName
+                                      ? `Component: ${turn.selectionTarget.componentName}`
+                                      : null,
+                                    turn.selectionTarget?.sourceFilePath
+                                      ? `File: ${turn.selectionTarget.sourceFilePath}`
+                                      : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" · ")}
+                                </p>
+                              ) : null}
+                              {turn.changedFiles.length ? (
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {turn.changedFiles.slice(0, 3).map((file) => (
+                                    <span
+                                      key={`${turn.id}-${file.path}`}
+                                      className="rounded-full border border-white/[0.08] bg-[#262628] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-slate-400"
+                                    >
+                                      {file.path}
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : null}
                             </div>
+                            ) : null}
                           </article>
                         );
                       })
@@ -1771,6 +1905,23 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   </div>
 
                   <div className="flex min-w-0 items-center justify-end gap-2">
+                    <div className="relative">
+                      <select
+                        className="h-8 w-[104px] appearance-none rounded-full border border-white/[0.08] bg-[#262628] px-3 pr-8 text-[11px] text-slate-300 outline-none transition hover:bg-[#303238]"
+                        value={editMode}
+                        onChange={(event) => setEditMode(event.target.value as EditMode)}
+                        title={`Edit mode: ${shortEditModeLabel(editMode)}`}
+                      >
+                        <option value="precise">Precise</option>
+                        <option value="scoped">Scoped</option>
+                        <option value="creative">Creative</option>
+                      </select>
+                      <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rotate-90 text-slate-500">
+                        <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5">
+                          <path d="M6 3L11 8L6 13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </div>
+                    </div>
                     <div className="relative">
                       <select
                         className="h-8 w-[118px] appearance-none rounded-full border border-white/[0.08] bg-[#262628] px-3 pr-8 text-[11px] text-slate-300 outline-none transition hover:bg-[#303238]"

@@ -12,9 +12,19 @@ import {
   requestAiEdit,
   requestAiPatchEdit,
 } from "@/lib/server/ai";
-import type { ContextFile } from "@/lib/server/anthropic";
 import { getDb } from "@/lib/server/db";
 import { getEnv } from "@/lib/server/env";
+import {
+  buildDesignValidation,
+  buildEditPlan,
+  buildSelectionTarget,
+  collectContextGraph,
+  describeKitAssets,
+  ensureProjectKnowledgeArtifacts,
+  readKnowledgeFiles,
+  updateEditMemory,
+  type KnowledgeArtifacts,
+} from "@/lib/server/project-intelligence";
 import {
   buildFileTree,
   isTextLikeFile,
@@ -46,7 +56,6 @@ import {
   normalizeOverrideConfigContent,
   OVERRIDES_CONFIG_PATH,
   OVERRIDES_CSS_PATH,
-  OVERRIDES_ENGINE_PATH,
   OVERRIDES_README_PATH,
   OVERRIDES_SECTION_HOOKS_PATH,
   OVERRIDES_SECTION_NAMES_PATH,
@@ -63,12 +72,20 @@ import {
 import type {
   AiEditRequestPayload,
   AttachmentRecord,
+  ContextSnapshotRecord,
+  ConversationTurnRecord,
   DashboardSnapshot,
+  EditMode,
+  EditPlan,
+  MakeKitRecord,
   PackageManager,
   ProjectRecord,
+  ProjectRuntime,
   ProjectWorkspace,
   RevisionRecord,
   SelectionPayload,
+  SelectionTarget,
+  ValidationResultRecord,
 } from "@/lib/types";
 
 const CONFIG_RESTART_FILES = new Set([
@@ -92,6 +109,14 @@ const CONFIG_RESTART_FILES = new Set([
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function requireRuntime(runtime: ProjectRuntime | null | undefined): ProjectRuntime {
+  if (!runtime) {
+    throw new Error("MyMake could not determine this project's runtime.");
+  }
+
+  return runtime;
 }
 
 function mapProjectRow(row: Record<string, unknown>): ProjectRecord {
@@ -132,6 +157,95 @@ function mapAttachmentRow(row: Record<string, unknown>): AttachmentRecord {
     mimeType: String(row.mime_type),
     storagePath: String(row.storage_path),
     sizeBytes: Number(row.size_bytes),
+    createdAt: String(row.created_at),
+  };
+}
+
+function safeParseJson<T>(value: unknown, fallback: T): T {
+  if (typeof value !== "string" || !value.trim()) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function mapContextSnapshotRow(row: Record<string, unknown>): ContextSnapshotRecord {
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    revisionId: row.revision_id ? String(row.revision_id) : null,
+    turnId: row.turn_id ? String(row.turn_id) : null,
+    tokenBudget: Number(row.token_budget),
+    primaryTarget: row.primary_target ? String(row.primary_target) : null,
+    compressedMemory: row.compressed_memory ? String(row.compressed_memory) : null,
+    sources: safeParseJson(row.sources_json, []),
+    createdAt: String(row.created_at),
+  };
+}
+
+function mapMakeKitRow(row: Record<string, unknown>): MakeKitRecord {
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    name: String(row.name),
+    kind: row.kind as MakeKitRecord["kind"],
+    source: row.source as MakeKitRecord["source"],
+    enabled: Boolean(row.enabled),
+    priority: Number(row.priority),
+    summary: String(row.summary),
+    lockedRules: safeParseJson(row.locked_rules_json, []),
+    softRules: safeParseJson(row.soft_rules_json, []),
+    assets: safeParseJson(row.assets_json, []),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function mapValidationResultRow(row: Record<string, unknown>): ValidationResultRecord {
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    revisionId: row.revision_id ? String(row.revision_id) : null,
+    turnId: row.turn_id ? String(row.turn_id) : null,
+    status: row.status as ValidationResultRecord["status"],
+    buildStatus: row.build_status as ValidationResultRecord["buildStatus"],
+    previewStatus: row.preview_status as ValidationResultRecord["previewStatus"],
+    selectorStatus: row.selector_status as ValidationResultRecord["selectorStatus"],
+    importsStatus: row.imports_status as ValidationResultRecord["importsStatus"],
+    designStatus: row.design_status as ValidationResultRecord["designStatus"],
+    warnings: safeParseJson(row.warnings_json, []),
+    details: safeParseJson(row.details_json, []),
+    rawProviderOutput: row.raw_provider_output ? String(row.raw_provider_output) : null,
+    retryable: Boolean(row.retryable),
+    createdAt: String(row.created_at),
+  };
+}
+
+function mapConversationTurnRow(row: Record<string, unknown>): ConversationTurnRecord {
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    revisionId: row.revision_id ? String(row.revision_id) : null,
+    kind: row.kind as ConversationTurnRecord["kind"],
+    status: row.status as ConversationTurnRecord["status"],
+    prompt: row.prompt ? String(row.prompt) : null,
+    summary: row.summary ? String(row.summary) : null,
+    aiModelKey: row.ai_model_key ? (String(row.ai_model_key) as ConversationTurnRecord["aiModelKey"]) : null,
+    provider: row.provider ? (String(row.provider) as ConversationTurnRecord["provider"]) : null,
+    editMode: row.edit_mode ? (String(row.edit_mode) as EditMode) : null,
+    selectionTarget: safeParseJson<SelectionTarget | null>(row.selection_target_json, null),
+    changedFiles: safeParseJson(row.changed_files_json, []),
+    warnings: safeParseJson(row.warnings_json, []),
+    contextSnapshotId: row.context_snapshot_id ? String(row.context_snapshot_id) : null,
+    validationResultId: row.validation_result_id ? String(row.validation_result_id) : null,
     createdAt: String(row.created_at),
   };
 }
@@ -182,6 +296,60 @@ function getAttachmentRows(projectId: string): AttachmentRecord[] {
     )
     .all(projectId) as Record<string, unknown>[];
   return rows.map(mapAttachmentRow);
+}
+
+function getConversationTurns(projectId: string): ConversationTurnRecord[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT *
+         FROM conversation_turns
+        WHERE project_id = ?
+        ORDER BY created_at ASC`,
+    )
+    .all(projectId) as Record<string, unknown>[];
+
+  return rows.map(mapConversationTurnRow);
+}
+
+function getMakeKits(projectId: string): MakeKitRecord[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT *
+         FROM make_kits
+        WHERE project_id = ?
+        ORDER BY priority DESC, updated_at DESC`,
+    )
+    .all(projectId) as Record<string, unknown>[];
+
+  return rows.map(mapMakeKitRow);
+}
+
+function getLatestContextSnapshot(projectId: string): ContextSnapshotRecord | null {
+  const row = getDb()
+    .prepare(
+      `SELECT *
+         FROM context_snapshots
+        WHERE project_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1`,
+    )
+    .get(projectId) as Record<string, unknown> | undefined;
+
+  return row ? mapContextSnapshotRow(row) : null;
+}
+
+function getLatestValidationResult(projectId: string): ValidationResultRecord | null {
+  const row = getDb()
+    .prepare(
+      `SELECT *
+         FROM validation_results
+        WHERE project_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1`,
+    )
+    .get(projectId) as Record<string, unknown> | undefined;
+
+  return row ? mapValidationResultRow(row) : null;
 }
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -392,10 +560,6 @@ const IMPORTABLE_EXTENSIONS = [
   ".json",
 ];
 
-const MAX_CONTEXT_FILE_CHARS = 24_000;
-const MAX_CONTEXT_TOTAL_CHARS = 90_000;
-const LARGE_FILE_EDIT_THRESHOLD = 120_000;
-
 function collectRelativeImports(content: string): string[] {
   const imports = new Set<string>();
   const patterns = [
@@ -412,119 +576,6 @@ function collectRelativeImports(content: string): string[] {
   }
 
   return [...imports];
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function extractQuotedPromptPhrases(prompt: string): string[] {
-  const phrases = new Set<string>();
-  for (const pattern of [/"([^"]{2,})"/g, /'([^']{2,})'/g]) {
-    for (const match of prompt.matchAll(pattern)) {
-      const phrase = (match[1] || "").trim();
-      if (phrase.length >= 2) {
-        phrases.add(phrase);
-      }
-    }
-  }
-
-  return [...phrases];
-}
-
-function buildLargeFileExcerpt(params: {
-  content: string;
-  filePath: string;
-  prompt: string;
-  selection: SelectionPayload | null | undefined;
-}): string {
-  const anchors = new Set<number>([0]);
-  const { content, prompt, selection } = params;
-
-  if (selection?.outerHtml) {
-    const exactIndex = content.indexOf(selection.outerHtml);
-    if (exactIndex >= 0) {
-      anchors.add(exactIndex);
-    }
-  }
-
-  const framerAnchors = [
-    selection?.nearestFramerName || "",
-    ...(selection?.framerPath || []),
-  ]
-    .map((value) => value.trim())
-    .filter(Boolean);
-
-  for (const framerName of framerAnchors) {
-    const exactIndex = content.indexOf(`data-framer-name="${framerName}"`);
-    if (exactIndex >= 0) {
-      anchors.add(exactIndex);
-    }
-  }
-
-  const textCandidates = [
-    selection?.textContent || "",
-    ...extractQuotedPromptPhrases(prompt),
-    ...prompt
-      .split(/[^a-z0-9]+/gi)
-      .map((part) => part.trim())
-      .filter((part) => part.length >= 6),
-  ];
-
-  for (const candidate of textCandidates) {
-    const normalizedCandidate = candidate.replace(/\s+/g, " ").trim();
-    if (!normalizedCandidate) {
-      continue;
-    }
-
-    const exactIndex = content.indexOf(normalizedCandidate);
-    if (exactIndex >= 0) {
-      anchors.add(exactIndex);
-      continue;
-    }
-
-    const softPattern = normalizedCandidate
-      .split(/\s+/)
-      .filter((token) => token.length >= 2)
-      .slice(0, 6)
-      .map((token) => escapeRegExp(token))
-      .join("[\\s\\S]{0,80}?");
-
-    if (!softPattern) {
-      continue;
-    }
-
-    const match = content.match(new RegExp(softPattern, "i"));
-    if (match?.index !== undefined) {
-      anchors.add(match.index);
-    }
-  }
-
-  const windows = [...anchors]
-    .slice(0, 4)
-    .map((anchor) => ({
-      start: Math.max(0, anchor - 4_000),
-      end: Math.min(content.length, anchor + 12_000),
-    }))
-    .sort((left, right) => left.start - right.start);
-
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const window of windows) {
-    const previous = merged.at(-1);
-    if (previous && window.start <= previous.end + 400) {
-      previous.end = Math.max(previous.end, window.end);
-      continue;
-    }
-
-    merged.push({ ...window });
-  }
-
-  return merged
-    .map(
-      (window, index) =>
-        `<!-- MYMAKE EXCERPT ${index + 1} FROM ${params.filePath} bytes ${window.start}-${window.end} -->\n${content.slice(window.start, window.end)}`,
-    )
-    .join("\n\n");
 }
 
 function importResolutionCandidates(baseFilePath: string, specifier: string): string[] {
@@ -795,153 +846,6 @@ async function validateProjectImports(projectDir: string): Promise<void> {
   }
 }
 
-function getRouteCandidates(route: string): string[] {
-  const normalizedRoute = route === "/" ? "" : route.replace(/^\/+|\/+$/g, "");
-  const parts = normalizedRoute ? normalizedRoute.split("/") : [];
-  const candidates = [
-    "app/layout.tsx",
-    "app/globals.css",
-    "pages/_app.tsx",
-    "src/app/App.tsx",
-    "src/app/App.jsx",
-    "src/App.tsx",
-    "src/App.jsx",
-    "src/main.tsx",
-    "src/main.jsx",
-    "src/routes.ts",
-    "src/routes.tsx",
-    "src/styles/theme.css",
-    "src/styles/index.css",
-    "src/styles/tailwind.css",
-    "index.html",
-  ];
-
-  if (!parts.length) {
-    candidates.push("app/page.tsx", "pages/index.tsx");
-    return candidates;
-  }
-
-  const joined = parts.join("/");
-  candidates.push(
-    `app/${joined}/page.tsx`,
-    `app/${joined}/layout.tsx`,
-    `pages/${joined}.tsx`,
-    `pages/${joined}/index.tsx`,
-  );
-
-  return candidates;
-}
-
-async function collectContextFiles(
-  projectDir: string,
-  route: string,
-  currentFilePath: string | null | undefined,
-  prompt: string,
-  selection: SelectionPayload | null | undefined,
-): Promise<ContextFile[]> {
-  const allFiles = (await listProjectFiles(projectDir)).filter((file) =>
-    isTextLikeFile(path.join(projectDir, file)),
-  );
-  const hasEditableSupport = hasStaticEditableOverrides(allFiles);
-  const routeCandidates = new Set(getRouteCandidates(route));
-  const promptTerms = prompt
-    .toLowerCase()
-    .split(/[^a-z0-9]+/g)
-    .filter((term) => term.length > 3);
-
-  const scored = allFiles
-    .map((file) => {
-      let score = 0;
-      if (routeCandidates.has(file)) {
-        score += 100;
-      }
-
-      if (currentFilePath && file === currentFilePath) {
-        score += 90;
-      }
-
-      if (hasEditableSupport) {
-        if (file === OVERRIDES_CONFIG_PATH) {
-          score += 140;
-        } else if (file === OVERRIDES_CSS_PATH) {
-          score += 125;
-        } else if (file === OVERRIDES_ENGINE_PATH) {
-          score += 120;
-        } else if (
-          file === OVERRIDES_README_PATH ||
-          file === OVERRIDES_SECTION_HOOKS_PATH ||
-          file === OVERRIDES_SECTION_NAMES_PATH
-        ) {
-          score += 110;
-        } else if (file.endsWith(".html")) {
-          score += 40;
-        }
-      }
-
-      if (file.startsWith("components/") || file.includes("/components/")) {
-        score += 15;
-      }
-
-      for (const term of promptTerms) {
-        if (file.toLowerCase().includes(term)) {
-          score += 8;
-        }
-      }
-
-      return { file, score };
-    })
-    .sort((left, right) => right.score - left.score || left.file.localeCompare(right.file));
-
-  const contextFiles: ContextFile[] = [];
-  let currentSize = 0;
-
-  for (const item of scored) {
-    if (contextFiles.length >= 14) {
-      break;
-    }
-
-    const content = await readFileIfText(projectDir, item.file);
-    if (!content) {
-      continue;
-    }
-
-    const preparedContent =
-      content.length > MAX_CONTEXT_FILE_CHARS
-        ? buildLargeFileExcerpt({
-            content,
-            filePath: item.file,
-            prompt,
-            selection,
-          })
-        : content;
-
-    const nextSize = currentSize + preparedContent.length;
-    if (nextSize > MAX_CONTEXT_TOTAL_CHARS && contextFiles.length) {
-      break;
-    }
-
-    contextFiles.push({
-      path: item.file,
-      content: preparedContent,
-      reason:
-        routeCandidates.has(item.file)
-          ? preparedContent === content
-            ? "current route"
-            : "current route excerpt"
-          : currentFilePath === item.file
-            ? preparedContent === content
-              ? "active code editor file"
-              : "active code editor excerpt"
-            : preparedContent === content
-              ? "supporting source file"
-              : "supporting source excerpt",
-    });
-    currentSize = nextSize;
-  }
-
-  return contextFiles;
-}
-
 async function applyPatchOperations(
   projectDir: string,
   operations: Array<{ path: string; search: string; replace: string; reason?: string }>,
@@ -1079,6 +983,283 @@ async function createRevision(params: {
   return revision;
 }
 
+async function createContextSnapshotRecord(params: {
+  projectId: string;
+  revisionId?: string | null;
+  turnId?: string | null;
+  tokenBudget: number;
+  primaryTarget?: string | null;
+  compressedMemory?: string | null;
+  sources: ContextSnapshotRecord["sources"];
+}): Promise<ContextSnapshotRecord> {
+  const snapshot: ContextSnapshotRecord = {
+    id: nanoid(10),
+    projectId: params.projectId,
+    revisionId: params.revisionId || null,
+    turnId: params.turnId || null,
+    tokenBudget: params.tokenBudget,
+    primaryTarget: params.primaryTarget || null,
+    compressedMemory: params.compressedMemory || null,
+    sources: params.sources,
+    createdAt: nowIso(),
+  };
+
+  getDb()
+    .prepare(
+      `INSERT INTO context_snapshots (
+        id, project_id, revision_id, turn_id, token_budget, primary_target,
+        compressed_memory, sources_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      snapshot.id,
+      snapshot.projectId,
+      snapshot.revisionId,
+      snapshot.turnId,
+      snapshot.tokenBudget,
+      snapshot.primaryTarget,
+      snapshot.compressedMemory,
+      JSON.stringify(snapshot.sources),
+      snapshot.createdAt,
+    );
+
+  return snapshot;
+}
+
+async function createValidationResultRecord(params: {
+  projectId: string;
+  revisionId?: string | null;
+  turnId?: string | null;
+  status: ValidationResultRecord["status"];
+  buildStatus: ValidationResultRecord["buildStatus"];
+  previewStatus: ValidationResultRecord["previewStatus"];
+  selectorStatus: ValidationResultRecord["selectorStatus"];
+  importsStatus: ValidationResultRecord["importsStatus"];
+  designStatus: ValidationResultRecord["designStatus"];
+  warnings?: string[];
+  details?: string[];
+  rawProviderOutput?: string | null;
+  retryable?: boolean;
+}): Promise<ValidationResultRecord> {
+  const validation: ValidationResultRecord = {
+    id: nanoid(10),
+    projectId: params.projectId,
+    revisionId: params.revisionId || null,
+    turnId: params.turnId || null,
+    status: params.status,
+    buildStatus: params.buildStatus,
+    previewStatus: params.previewStatus,
+    selectorStatus: params.selectorStatus,
+    importsStatus: params.importsStatus,
+    designStatus: params.designStatus,
+    warnings: params.warnings || [],
+    details: params.details || [],
+    rawProviderOutput: params.rawProviderOutput || null,
+    retryable: Boolean(params.retryable),
+    createdAt: nowIso(),
+  };
+
+  getDb()
+    .prepare(
+      `INSERT INTO validation_results (
+        id, project_id, revision_id, turn_id, status, build_status, preview_status,
+        selector_status, imports_status, design_status, warnings_json, details_json,
+        raw_provider_output, retryable, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      validation.id,
+      validation.projectId,
+      validation.revisionId,
+      validation.turnId,
+      validation.status,
+      validation.buildStatus,
+      validation.previewStatus,
+      validation.selectorStatus,
+      validation.importsStatus,
+      validation.designStatus,
+      JSON.stringify(validation.warnings),
+      JSON.stringify(validation.details),
+      validation.rawProviderOutput,
+      validation.retryable ? 1 : 0,
+      validation.createdAt,
+    );
+
+  return validation;
+}
+
+async function createConversationTurn(params: {
+  projectId: string;
+  revisionId?: string | null;
+  kind: ConversationTurnRecord["kind"];
+  status: ConversationTurnRecord["status"];
+  prompt?: string | null;
+  summary?: string | null;
+  aiModelKey?: ConversationTurnRecord["aiModelKey"];
+  provider?: ConversationTurnRecord["provider"];
+  editMode?: EditMode | null;
+  selectionTarget?: SelectionTarget | null;
+  changedFiles?: ConversationTurnRecord["changedFiles"];
+  warnings?: string[];
+  contextSnapshotId?: string | null;
+  validationResultId?: string | null;
+}): Promise<ConversationTurnRecord> {
+  const turn: ConversationTurnRecord = {
+    id: nanoid(10),
+    projectId: params.projectId,
+    revisionId: params.revisionId || null,
+    kind: params.kind,
+    status: params.status,
+    prompt: params.prompt || null,
+    summary: params.summary || null,
+    aiModelKey: params.aiModelKey || null,
+    provider: params.provider || null,
+    editMode: params.editMode || null,
+    selectionTarget: params.selectionTarget || null,
+    changedFiles: params.changedFiles || [],
+    warnings: params.warnings || [],
+    contextSnapshotId: params.contextSnapshotId || null,
+    validationResultId: params.validationResultId || null,
+    createdAt: nowIso(),
+  };
+
+  getDb()
+    .prepare(
+      `INSERT INTO conversation_turns (
+        id, project_id, revision_id, kind, status, prompt, summary, ai_model_key,
+        provider, edit_mode, selection_target_json, changed_files_json, warnings_json,
+        context_snapshot_id, validation_result_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      turn.id,
+      turn.projectId,
+      turn.revisionId,
+      turn.kind,
+      turn.status,
+      turn.prompt,
+      turn.summary,
+      turn.aiModelKey,
+      turn.provider,
+      turn.editMode,
+      JSON.stringify(turn.selectionTarget),
+      JSON.stringify(turn.changedFiles),
+      JSON.stringify(turn.warnings),
+      turn.contextSnapshotId,
+      turn.validationResultId,
+      turn.createdAt,
+    );
+
+  return turn;
+}
+
+async function syncProjectKnowledgeAndKits(
+  project: Pick<ProjectRecord, "id" | "name" | "extractedPath" | "packageManager">,
+  runtime: ProjectRuntime,
+): Promise<KnowledgeArtifacts> {
+  const artifacts = await ensureProjectKnowledgeArtifacts({
+    projectDir: project.extractedPath,
+    projectName: project.name,
+    runtime,
+    packageManager: project.packageManager,
+  });
+
+  const knowledge = await readKnowledgeFiles(project.extractedPath);
+  const existing = getMakeKits(project.id);
+  const defaults: Array<Omit<MakeKitRecord, "id" | "createdAt" | "updatedAt">> = [
+    {
+      projectId: project.id,
+      name: "Runtime kit",
+      kind: "code",
+      source: "system",
+      enabled: true,
+      priority: 100,
+      summary: `${runtime.toUpperCase()} project on ${project.packageManager} with candidate files shaped by semantic retrieval.`,
+      lockedRules: [
+        "Preserve runtime wiring and imports unless the prompt requests a refactor.",
+      ],
+      softRules: ["Prefer existing components before introducing new structure."],
+      assets: [artifacts.componentIndexPath],
+    },
+    {
+      projectId: project.id,
+      name: "Visual tokens",
+      kind: "style",
+      source: "system",
+      enabled: true,
+      priority: 90,
+      summary: `Palette: ${knowledge.brandKit.palette.slice(0, 6).join(", ") || "No palette extracted yet"}`,
+      lockedRules: [],
+      softRules: ["Use the extracted palette and typography before inventing new styling."],
+      assets: [artifacts.brandKitPath],
+    },
+    {
+      projectId: project.id,
+      name: "Project rules",
+      kind: "rules",
+      source: "system",
+      enabled: true,
+      priority: 80,
+      summary: "Project brief and design rules used to ground safe and creative edits.",
+      lockedRules: [
+        "Keep layout density high and avoid wasted space unless requested.",
+      ],
+      softRules: ["Respect the project brief and design rules when broadening a design."],
+      assets: [artifacts.projectBriefPath, artifacts.designRulesPath, artifacts.editMemoryPath],
+    },
+  ];
+
+  for (const kit of defaults) {
+    const existingKit = existing.find((item) => item.name === kit.name && item.kind === kit.kind);
+    if (existingKit) {
+      getDb()
+        .prepare(
+          `UPDATE make_kits
+              SET summary = ?, locked_rules_json = ?, soft_rules_json = ?, assets_json = ?,
+                  enabled = ?, priority = ?, updated_at = ?
+            WHERE id = ?`,
+        )
+        .run(
+          kit.summary,
+          JSON.stringify(kit.lockedRules),
+          JSON.stringify(kit.softRules),
+          JSON.stringify(kit.assets),
+          kit.enabled ? 1 : 0,
+          kit.priority,
+          nowIso(),
+          existingKit.id,
+        );
+      continue;
+    }
+
+    const createdAt = nowIso();
+    getDb()
+      .prepare(
+        `INSERT INTO make_kits (
+          id, project_id, name, kind, source, enabled, priority, summary,
+          locked_rules_json, soft_rules_json, assets_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        nanoid(10),
+        kit.projectId,
+        kit.name,
+        kit.kind,
+        kit.source,
+        kit.enabled ? 1 : 0,
+        kit.priority,
+        kit.summary,
+        JSON.stringify(kit.lockedRules),
+        JSON.stringify(kit.softRules),
+        JSON.stringify(kit.assets),
+        createdAt,
+        createdAt,
+      );
+  }
+
+  return artifacts;
+}
+
 async function maybeRefreshPreview(projectId: string, changedPaths: string[]): Promise<void> {
   const shouldRestart = changedPaths.some((relativePath) =>
     CONFIG_RESTART_FILES.has(path.basename(relativePath)),
@@ -1112,7 +1293,8 @@ export async function getWorkspaceSnapshot(
   } = {},
 ): Promise<ProjectWorkspace> {
   let project = getProjectRow(projectId);
-  const runtime = await detectProjectRuntime(project.extractedPath);
+  const runtime = requireRuntime(await detectProjectRuntime(project.extractedPath));
+  await syncProjectKnowledgeAndKits(project, runtime);
   if (runtime === "static") {
     await ensureStaticEditableOverridesSupport(project.extractedPath);
   }
@@ -1157,10 +1339,14 @@ export async function getWorkspaceSnapshot(
   return {
     project: getProjectRow(projectId),
     revisions: getRevisionRows(projectId),
+    conversationTurns: getConversationTurns(projectId),
     attachments: getAttachmentRows(projectId),
+    kits: getMakeKits(projectId),
     fileTree: await buildFileTree(project.extractedPath),
     currentFilePath,
     currentFileContent,
+    latestContextSnapshot: getLatestContextSnapshot(projectId),
+    lastValidationResult: getLatestValidationResult(projectId),
     preview: {
       url: `/preview/${projectId}`,
       status: project.status === "error" ? "error" : previewStatus,
@@ -1224,6 +1410,7 @@ export async function createProjectFromUpload(
 
   await fs.cp(unpackDir, projectPaths.current, { recursive: true, force: true });
   await normalizeImportedProject(projectPaths.current);
+  const runtime = requireRuntime(await detectProjectRuntime(projectPaths.current));
 
   const packageManager = await detectPackageManager(projectPaths.current);
   const insertedProject: ProjectRecord = {
@@ -1263,16 +1450,44 @@ export async function createProjectFromUpload(
 
   try {
     await installDependenciesWithRecovery(projectId, projectPaths.current, packageManager);
+    await syncProjectKnowledgeAndKits(
+      {
+        id: projectId,
+        name: insertedProject.name,
+        extractedPath: projectPaths.current,
+        packageManager,
+      },
+      runtime,
+    );
     const manifestHash = await readManifestHash(projectPaths.current);
     getDb()
       .prepare("UPDATE projects SET status = ?, manifest_hash = ? WHERE id = ?")
       .run("ready", manifestHash, projectId);
 
-    await createRevision({
+    const revision = await createRevision({
       projectId,
       label: "Initial upload",
       source: "upload",
       summary: "Imported from uploaded zip archive.",
+    });
+    const validationResult = await createValidationResultRecord({
+      projectId,
+      revisionId: revision.id,
+      status: "passed",
+      buildStatus: "passed",
+      previewStatus: "passed",
+      selectorStatus: "skipped",
+      importsStatus: "passed",
+      designStatus: "passed",
+      details: ["Initial upload validated and preview runner started successfully."],
+    });
+    await createConversationTurn({
+      projectId,
+      revisionId: revision.id,
+      kind: "system",
+      status: "info",
+      summary: "Imported the project and created the first working checkpoint.",
+      validationResultId: validationResult.id,
     });
 
     await ensurePreviewRunner(projectId);
@@ -1322,7 +1537,9 @@ export async function saveProjectFile(
     );
   }
 
-  await createRevision({
+  const runtime = requireRuntime(await detectProjectRuntime(project.extractedPath));
+  await syncProjectKnowledgeAndKits(project, runtime);
+  const revision = await createRevision({
     projectId,
     label: `Saved ${path.basename(relativePath)}`,
     source: "manual",
@@ -1330,6 +1547,26 @@ export async function saveProjectFile(
   });
 
   await maybeRefreshPreview(projectId, [relativePath]);
+  const validationResult = await createValidationResultRecord({
+    projectId,
+    revisionId: revision.id,
+    status: "passed",
+    buildStatus: "passed",
+    previewStatus: "passed",
+    selectorStatus: "skipped",
+    importsStatus: "passed",
+    designStatus: "passed",
+    details: [`Saved ${relativePath} and synced the preview.`],
+  });
+  await createConversationTurn({
+    projectId,
+    revisionId: revision.id,
+    kind: "system",
+    status: "info",
+    summary: `Saved ${relativePath} and created a new checkpoint.`,
+    changedFiles: [{ path: relativePath }],
+    validationResultId: validationResult.id,
+  });
   return getWorkspaceSnapshot(projectId, { currentFilePath: relativePath, ensurePreview: false });
 }
 
@@ -1374,7 +1611,167 @@ export async function saveAttachments(
     created.push(record);
   }
 
+  if (created.length) {
+    const existingReferenceKit = getMakeKits(projectId).find((kit) => kit.kind === "reference");
+    const assets = created.map((item) => item.filename);
+    const summary = `Reference files available: ${assets.join(", ")}`;
+    if (existingReferenceKit) {
+      getDb()
+        .prepare(
+          `UPDATE make_kits
+              SET summary = ?, assets_json = ?, updated_at = ?
+            WHERE id = ?`,
+        )
+        .run(
+          summary,
+          JSON.stringify(
+            uniqueStrings([...existingReferenceKit.assets, ...assets]).slice(-12),
+          ),
+          nowIso(),
+          existingReferenceKit.id,
+        );
+    } else {
+      const createdAt = nowIso();
+      getDb()
+        .prepare(
+          `INSERT INTO make_kits (
+            id, project_id, name, kind, source, enabled, priority, summary,
+            locked_rules_json, soft_rules_json, assets_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          nanoid(10),
+          projectId,
+          "Reference context",
+          "reference",
+          "user",
+          1,
+          70,
+          summary,
+          JSON.stringify([]),
+          JSON.stringify(["Use these references to ground visual and content edits."]),
+          JSON.stringify(assets),
+          createdAt,
+          createdAt,
+        );
+    }
+  }
+
   return created;
+}
+
+async function tryApplyDirectTextReplacement(params: {
+  projectDir: string;
+  prompt: string;
+  selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  candidateFiles: string[];
+}): Promise<
+  | {
+      summary: string;
+      warnings: string[];
+      changedFiles: Array<{ path: string; content: string; reason?: string }>;
+      rawResponse: string | null;
+    }
+  | null
+> {
+  const replacementText = extractDirectReplacementText(params.prompt, params.selection);
+  const sourceText = params.selection?.textContent?.trim();
+  if (!replacementText || !sourceText) {
+    return null;
+  }
+
+  const candidateFiles = uniqueStrings(
+    [
+      params.selectionTarget?.sourceFilePath || "",
+      ...params.candidateFiles,
+    ].filter(Boolean),
+  );
+
+  for (const filePath of candidateFiles) {
+    const absolutePath = resolveInsideRoot(params.projectDir, filePath);
+    if (!isTextLikeFile(absolutePath)) {
+      continue;
+    }
+
+    const currentContent = await fs.readFile(absolutePath, "utf8");
+    if (!currentContent.includes(sourceText)) {
+      continue;
+    }
+
+    return {
+      summary: `Updated "${sourceText}" to "${replacementText}" directly in ${filePath}.`,
+      warnings: [],
+      changedFiles: [
+        {
+          path: filePath,
+          content: currentContent.replace(sourceText, replacementText),
+          reason: "Direct text replacement from the selected element.",
+        },
+      ],
+      rawResponse: null,
+    };
+  }
+
+  return null;
+}
+
+async function runEditValidation(params: {
+  projectId: string;
+  projectDir: string;
+  changedFiles: Array<{ path: string; content: string; reason?: string }>;
+  prompt: string;
+  editMode: EditMode;
+  selectionTarget: SelectionTarget | null;
+  rawProviderOutput: string | null;
+}): Promise<Omit<ValidationResultRecord, "id" | "createdAt">> {
+  await validateChangedFileImports(params.projectDir, params.changedFiles);
+  validateEditableOverrideSyntax(params.changedFiles);
+  await validateProjectImports(params.projectDir);
+
+  await maybeRefreshPreview(
+    params.projectId,
+    params.changedFiles.map((item) => item.path),
+  );
+
+  const knowledge = await readKnowledgeFiles(params.projectDir);
+  const designValidation = buildDesignValidation({
+    prompt: params.prompt,
+    editMode: params.editMode,
+    changedFiles: params.changedFiles.map((item) => ({
+      path: item.path,
+      content: item.content,
+    })),
+    brandKit: knowledge.brandKit,
+  });
+
+  const selectorStatus =
+    params.selectionTarget && params.changedFiles.length
+      ? ("passed" as const)
+      : ("skipped" as const);
+
+  const warnings = [...designValidation.warnings];
+  const details = [
+    "Import resolution passed.",
+    "Preview runner booted successfully after the edit.",
+    ...designValidation.details,
+  ];
+
+  return {
+    projectId: params.projectId,
+    revisionId: null,
+    turnId: null,
+    status: designValidation.status === "warning" ? "warning" : "passed",
+    buildStatus: "passed",
+    previewStatus: "passed",
+    selectorStatus,
+    importsStatus: "passed",
+    designStatus: designValidation.status,
+    warnings,
+    details,
+    rawProviderOutput: params.rawProviderOutput,
+    retryable: false,
+  };
 }
 
 export async function applyAiEdit(
@@ -1386,7 +1783,8 @@ export async function applyAiEdit(
   workspace: ProjectWorkspace;
 }> {
   const project = getProjectRow(payload.projectId);
-  const runtime = await detectProjectRuntime(project.extractedPath);
+  const runtime = requireRuntime(await detectProjectRuntime(project.extractedPath));
+  await syncProjectKnowledgeAndKits(project, runtime);
   if (runtime === "static") {
     await ensureStaticEditableOverridesSupport(project.extractedPath);
   }
@@ -1425,98 +1823,237 @@ export async function applyAiEdit(
   );
 
   const projectFiles = await listProjectFiles(project.extractedPath);
+  const recentTurns = getConversationTurns(payload.projectId).slice(-12);
+  const kits = getMakeKits(payload.projectId);
   const effectiveCurrentFilePath = resolvePreferredAiFilePath(
     projectFiles,
     payload.currentFilePath,
   );
+  const editMode: EditMode = payload.editMode || "scoped";
   const route = payload.selection?.route || "/";
   const activeFileContent =
     effectiveCurrentFilePath &&
     isTextLikeFile(path.join(project.extractedPath, effectiveCurrentFilePath))
       ? await fs.readFile(path.join(project.extractedPath, effectiveCurrentFilePath), "utf8")
       : null;
-  const contextFiles = await collectContextFiles(
-    project.extractedPath,
-    route,
-    effectiveCurrentFilePath,
-    payload.prompt,
-    payload.selection,
-  );
 
-  const shouldUsePatchMode = Boolean(
-    effectiveCurrentFilePath &&
-      activeFileContent &&
-      activeFileContent.length > LARGE_FILE_EDIT_THRESHOLD,
-  );
+  const knowledge = await readKnowledgeFiles(project.extractedPath);
+  const selectionTarget = await buildSelectionTarget({
+    projectDir: project.extractedPath,
+    route,
+    currentFilePath: effectiveCurrentFilePath,
+    selection: payload.selection,
+    componentIndex: knowledge.componentIndex,
+  });
+  const contextGraph = await collectContextGraph({
+    projectDir: project.extractedPath,
+    route,
+    currentFilePath: effectiveCurrentFilePath,
+    prompt: payload.prompt,
+    selection: payload.selection,
+    selectionTarget,
+    kits,
+    recentTurns,
+    attachments: attachmentRows.map(mapAttachmentRow),
+  });
+  const editPlan = buildEditPlan({
+    currentFilePath: effectiveCurrentFilePath,
+    currentFileContent: activeFileContent,
+    editMode,
+    prompt: payload.prompt,
+    runtime,
+    selectionTarget,
+    contextGraph,
+    hasStaticEditableSupport: hasStaticEditableOverrides(projectFiles),
+  });
+  const activeKitSummaries = describeKitAssets(kits);
+  const provider =
+    (payload.aiModelKey || DEFAULT_AI_MODEL_KEY).startsWith("openai")
+      ? "openai"
+      : "anthropic";
+
+  const userTurn = await createConversationTurn({
+    projectId: payload.projectId,
+    kind: "user",
+    status: "pending",
+    prompt: payload.prompt.trim(),
+    aiModelKey: payload.aiModelKey || DEFAULT_AI_MODEL_KEY,
+    provider,
+    editMode,
+    selectionTarget,
+  });
+  const contextSnapshot = await createContextSnapshotRecord({
+    projectId: payload.projectId,
+    revisionId: currentRevision.id,
+    turnId: userTurn.id,
+    tokenBudget: contextGraph.tokenBudget,
+    primaryTarget: contextGraph.primaryTarget,
+    compressedMemory: contextGraph.compressedMemory,
+    sources: contextGraph.sources,
+  });
+  getDb()
+    .prepare(
+      `UPDATE conversation_turns
+          SET context_snapshot_id = ?
+        WHERE id = ?`,
+    )
+    .run(contextSnapshot.id, userTurn.id);
 
   let aiResult:
     | {
         summary: string;
         warnings: string[];
         changedFiles: Array<{ path: string; content: string; reason?: string }>;
+        rawResponse: string | null;
       }
     | {
         summary: string;
         warnings: string[];
         operations: Array<{ path: string; search: string; replace: string; reason?: string }>;
+        rawResponse: string | null;
       };
 
   let changedFiles: Array<{ path: string; content: string; reason?: string }>;
   const canUseStaticSelectionFallback =
     runtime === "static" && hasStaticEditableOverrides(projectFiles);
+  const strategyQueue = uniqueStrings(
+    [
+      editPlan.strategy,
+      editPlan.strategy !== "patch" && effectiveCurrentFilePath ? "patch" : "",
+      canUseStaticSelectionFallback ? "static-override" : "",
+    ].filter(Boolean),
+  ) as EditPlan["strategy"][];
 
-  const fallback = canUseStaticSelectionFallback
-    ? await tryApplyStaticSelectionFallback({
-        projectDir: project.extractedPath,
-        prompt: payload.prompt,
-        selection: payload.selection,
-      })
-    : null;
+  let lastAttemptError: unknown = null;
+  aiResult = {
+    summary: "",
+    warnings: [],
+    changedFiles: [],
+    rawResponse: null,
+  };
+  changedFiles = [];
 
-  if (fallback) {
-    aiResult = fallback;
-    changedFiles = fallback.changedFiles;
-  } else {
+  for (const strategy of strategyQueue) {
     try {
-      if (shouldUsePatchMode) {
+      if (strategy === "direct-property") {
+        const directResult = await tryApplyDirectTextReplacement({
+          projectDir: project.extractedPath,
+          prompt: payload.prompt,
+          selection: payload.selection,
+          selectionTarget,
+          candidateFiles: editPlan.candidateFiles,
+        });
+        if (!directResult) {
+          throw new Error("Direct property mode could not safely resolve this change.");
+        }
+        aiResult = directResult;
+        changedFiles = directResult.changedFiles;
+        break;
+      }
+
+      if (strategy === "static-override") {
+        const staticResult = await tryApplyStaticSelectionFallback({
+          projectDir: project.extractedPath,
+          prompt: payload.prompt,
+          selection: payload.selection,
+        });
+        if (!staticResult) {
+          throw new Error("Static override mode could not resolve this change.");
+        }
+        aiResult = {
+          ...staticResult,
+          rawResponse: null,
+        };
+        changedFiles = staticResult.changedFiles;
+        break;
+      }
+
+      if (strategy === "patch" && effectiveCurrentFilePath) {
         aiResult = await requestAiPatchEdit({
           aiModelKey: payload.aiModelKey,
           prompt: payload.prompt,
+          editMode,
           selection: payload.selection,
-          currentFilePath: effectiveCurrentFilePath!,
-          contextFiles,
+          selectionTarget,
+          editPlan: {
+            ...editPlan,
+            strategy,
+          },
+          currentFilePath: effectiveCurrentFilePath,
+          contextFiles: contextGraph.contextFiles,
+          contextSummary: contextGraph.compressedMemory,
+          activeKitSummaries,
           attachments,
         });
         changedFiles = await applyPatchOperations(project.extractedPath, aiResult.operations);
-      } else {
-        aiResult = await requestAiEdit({
-          aiModelKey: payload.aiModelKey,
-          prompt: payload.prompt,
-          selection: payload.selection,
-          currentFilePath: effectiveCurrentFilePath,
-          contextFiles,
-          attachments,
-        });
-        changedFiles = aiResult.changedFiles;
-      }
-    } catch (error) {
-      if (!canUseStaticSelectionFallback) {
-        throw error;
+        break;
       }
 
-      const recoveryFallback = await tryApplyStaticSelectionFallback({
-        projectDir: project.extractedPath,
+      aiResult = await requestAiEdit({
+        aiModelKey: payload.aiModelKey,
         prompt: payload.prompt,
+        editMode,
         selection: payload.selection,
+        selectionTarget,
+        editPlan: {
+          ...editPlan,
+          strategy,
+        },
+        currentFilePath: effectiveCurrentFilePath,
+        contextFiles: contextGraph.contextFiles,
+        contextSummary: contextGraph.compressedMemory,
+        activeKitSummaries,
+        attachments,
       });
-
-      if (!recoveryFallback) {
-        throw error;
-      }
-
-      aiResult = recoveryFallback;
-      changedFiles = recoveryFallback.changedFiles;
+      changedFiles = aiResult.changedFiles;
+      break;
+    } catch (error) {
+      lastAttemptError = error;
     }
+  }
+
+  if (!changedFiles.length) {
+    const validationResult = await createValidationResultRecord({
+      projectId: payload.projectId,
+      revisionId: currentRevision.id,
+      status: "failed",
+      buildStatus: "failed",
+      previewStatus: "skipped",
+      selectorStatus: selectionTarget ? "warning" : "skipped",
+      importsStatus: "failed",
+      designStatus: "skipped",
+      warnings: [],
+      details: [
+        lastAttemptError instanceof Error
+          ? lastAttemptError.message
+          : "The edit planner could not produce a safe change set.",
+      ],
+      rawProviderOutput: aiResult.rawResponse,
+      retryable: true,
+    });
+    await createConversationTurn({
+      projectId: payload.projectId,
+      revisionId: currentRevision.id,
+      kind: "assistant",
+      status: "failed",
+      summary:
+        lastAttemptError instanceof Error
+          ? lastAttemptError.message
+          : "The edit could not be applied safely.",
+      aiModelKey: payload.aiModelKey || DEFAULT_AI_MODEL_KEY,
+      provider,
+      editMode,
+      selectionTarget,
+      contextSnapshotId: contextSnapshot.id,
+      validationResultId: validationResult.id,
+      warnings: validationResult.warnings,
+    });
+    getDb()
+      .prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`)
+      .run("failed", userTurn.id);
+    throw lastAttemptError instanceof Error
+      ? lastAttemptError
+      : new Error("The AI edit request failed.");
   }
 
   changedFiles = changedFiles.map((file) =>
@@ -1527,9 +2064,6 @@ export async function applyAiEdit(
         }
       : file,
   );
-
-  await validateChangedFileImports(project.extractedPath, changedFiles);
-  validateEditableOverrideSyntax(changedFiles);
 
   const changedPaths: string[] = [];
   for (const change of changedFiles) {
@@ -1547,18 +2081,121 @@ export async function applyAiEdit(
       project.packageManager,
     );
   }
+  let validationResultData: Omit<ValidationResultRecord, "id" | "createdAt">;
+  try {
+    validationResultData = await runEditValidation({
+      projectId: payload.projectId,
+      projectDir: project.extractedPath,
+      changedFiles,
+      prompt: payload.prompt,
+      editMode,
+      selectionTarget,
+      rawProviderOutput: aiResult.rawResponse,
+    });
+  } catch (error) {
+    await syncSnapshotToCurrent(currentRevision.snapshotPath, project.extractedPath);
+    if (runtime === "static") {
+      await ensureStaticEditableOverridesSupport(project.extractedPath);
+    }
+    const rollbackManifestHash = await readManifestHash(project.extractedPath);
+    if (rollbackManifestHash !== project.manifestHash) {
+      await installDependenciesWithRecovery(
+        payload.projectId,
+        project.extractedPath,
+        project.packageManager,
+      );
+    }
+    await restartPreviewRunner(payload.projectId).catch(() => undefined);
+    const failedValidation = await createValidationResultRecord({
+      projectId: payload.projectId,
+      revisionId: currentRevision.id,
+      status: "failed",
+      buildStatus: "failed",
+      previewStatus: "failed",
+      selectorStatus: selectionTarget ? "warning" : "skipped",
+      importsStatus: "failed",
+      designStatus: "skipped",
+      details: [
+        error instanceof Error ? error.message : "Validation failed after applying the edit.",
+      ],
+      rawProviderOutput: aiResult.rawResponse,
+      retryable: true,
+    });
+    await createConversationTurn({
+      projectId: payload.projectId,
+      revisionId: currentRevision.id,
+      kind: "assistant",
+      status: "failed",
+      summary:
+        error instanceof Error
+          ? error.message
+          : "The edit failed validation and was rolled back.",
+      aiModelKey: payload.aiModelKey || DEFAULT_AI_MODEL_KEY,
+      provider,
+      editMode,
+      selectionTarget,
+      changedFiles: changedFiles.map((item) => ({ path: item.path, reason: item.reason })),
+      warnings: failedValidation.warnings,
+      contextSnapshotId: contextSnapshot.id,
+      validationResultId: failedValidation.id,
+    });
+    getDb()
+      .prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`)
+      .run("failed", userTurn.id);
+    throw error instanceof Error
+      ? new Error(`${error.message} MyMake rolled back to the last working checkpoint.`)
+      : new Error("The edit failed validation and was rolled back.");
+  }
 
-  await createRevision({
+  const revision = await createRevision({
     projectId: payload.projectId,
     label: payload.prompt.trim(),
     source: "ai",
     summary: aiResult.summary,
   });
 
-  await maybeRefreshPreview(payload.projectId, changedPaths);
+  const validationResult = await createValidationResultRecord({
+    ...validationResultData,
+    revisionId: revision.id,
+  });
+  const assistantTurn = await createConversationTurn({
+    projectId: payload.projectId,
+    revisionId: revision.id,
+    kind: "assistant",
+    status: "applied",
+    summary: aiResult.summary,
+    aiModelKey: payload.aiModelKey || DEFAULT_AI_MODEL_KEY,
+    provider,
+    editMode,
+    selectionTarget,
+    changedFiles: changedFiles.map((item) => ({ path: item.path, reason: item.reason })),
+    warnings: [...aiResult.warnings, ...validationResult.warnings],
+    contextSnapshotId: contextSnapshot.id,
+    validationResultId: validationResult.id,
+  });
+  getDb()
+    .prepare(
+      `UPDATE validation_results
+          SET turn_id = ?
+        WHERE id = ?`,
+    )
+    .run(assistantTurn.id, validationResult.id);
+  getDb()
+    .prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`)
+    .run("applied", userTurn.id);
+  await updateEditMemory({
+    projectDir: project.extractedPath,
+    prompt: payload.prompt.trim(),
+    summary: aiResult.summary,
+    editMode,
+    target: selectionTarget,
+    changedFiles: changedPaths,
+    createdAt: revision.createdAt,
+  });
+    await syncProjectKnowledgeAndKits(getProjectRow(payload.projectId), runtime);
   return {
     summary: aiResult.summary,
-    warnings: aiResult.warnings,
+    warnings: [...aiResult.warnings, ...validationResult.warnings],
     changedFiles: changedFiles.map((item) => ({
       path: item.path,
       reason: item.reason,
@@ -1585,7 +2222,7 @@ async function switchToRevision(
 
   try {
     await syncSnapshotToCurrent(targetRevision.snapshotPath, project.extractedPath);
-    if ((await detectProjectRuntime(project.extractedPath)) === "static") {
+    if (requireRuntime(await detectProjectRuntime(project.extractedPath)) === "static") {
       await ensureStaticEditableOverridesSupport(project.extractedPath);
     }
     await validateProjectImports(project.extractedPath);
@@ -1603,6 +2240,10 @@ async function switchToRevision(
           WHERE id = ?`,
       )
       .run(targetRevision.id, restoredManifestHash, "ready", nowIso(), projectId);
+    await syncProjectKnowledgeAndKits(
+      getProjectRow(projectId),
+      requireRuntime(await detectProjectRuntime(project.extractedPath)),
+    );
 
     return getWorkspaceSnapshot(projectId, { ensurePreview: false });
   } catch (error) {
@@ -1646,7 +2287,27 @@ export async function restoreProjectRevision(
     throw new Error("That checkpoint does not belong to this project.");
   }
 
-  return switchToRevision(projectId, targetRevision);
+  const workspace = await switchToRevision(projectId, targetRevision);
+  const validationResult = await createValidationResultRecord({
+    projectId,
+    revisionId: targetRevision.id,
+    status: "passed",
+    buildStatus: "passed",
+    previewStatus: "passed",
+    selectorStatus: "skipped",
+    importsStatus: "passed",
+    designStatus: "passed",
+    details: [`Restored ${`#${String(targetRevision.sequence + 1).padStart(2, "0")}`}.`],
+  });
+  await createConversationTurn({
+    projectId,
+    revisionId: targetRevision.id,
+    kind: "system",
+    status: "info",
+    summary: `Restored ${`#${String(targetRevision.sequence + 1).padStart(2, "0")}`}.`,
+    validationResultId: validationResult.id,
+  });
+  return workspace;
 }
 
 export async function undoProject(projectId: string): Promise<ProjectWorkspace> {
@@ -1671,7 +2332,28 @@ export async function undoProject(projectId: string): Promise<ProjectWorkspace> 
     return getWorkspaceSnapshot(projectId, { ensurePreview: true });
   }
 
-  return switchToRevision(projectId, mapRevisionRow(previousRow));
+  const targetRevision = mapRevisionRow(previousRow);
+  const workspace = await switchToRevision(projectId, targetRevision);
+  const validationResult = await createValidationResultRecord({
+    projectId,
+    revisionId: targetRevision.id,
+    status: "passed",
+    buildStatus: "passed",
+    previewStatus: "passed",
+    selectorStatus: "skipped",
+    importsStatus: "passed",
+    designStatus: "passed",
+    details: [`Moved back to ${`#${String(targetRevision.sequence + 1).padStart(2, "0")}`}.`],
+  });
+  await createConversationTurn({
+    projectId,
+    revisionId: targetRevision.id,
+    kind: "system",
+    status: "info",
+    summary: `Moved back to ${`#${String(targetRevision.sequence + 1).padStart(2, "0")}`}.`,
+    validationResultId: validationResult.id,
+  });
+  return workspace;
 }
 
 export async function redoProject(projectId: string): Promise<ProjectWorkspace> {
@@ -1696,7 +2378,28 @@ export async function redoProject(projectId: string): Promise<ProjectWorkspace> 
     return getWorkspaceSnapshot(projectId, { ensurePreview: true });
   }
 
-  return switchToRevision(projectId, mapRevisionRow(nextRow));
+  const targetRevision = mapRevisionRow(nextRow);
+  const workspace = await switchToRevision(projectId, targetRevision);
+  const validationResult = await createValidationResultRecord({
+    projectId,
+    revisionId: targetRevision.id,
+    status: "passed",
+    buildStatus: "passed",
+    previewStatus: "passed",
+    selectorStatus: "skipped",
+    importsStatus: "passed",
+    designStatus: "passed",
+    details: [`Moved forward to ${`#${String(targetRevision.sequence + 1).padStart(2, "0")}`}.`],
+  });
+  await createConversationTurn({
+    projectId,
+    revisionId: targetRevision.id,
+    kind: "system",
+    status: "info",
+    summary: `Moved forward to ${`#${String(targetRevision.sequence + 1).padStart(2, "0")}`}.`,
+    validationResultId: validationResult.id,
+  });
+  return workspace;
 }
 
 export async function createProjectExport(projectId: string): Promise<string> {

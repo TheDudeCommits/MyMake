@@ -5,7 +5,10 @@ import { getEnv } from "@/lib/server/env";
 import type {
   AiChangedFile,
   AnthropicAttachment,
+  EditMode,
+  EditPlan,
   SelectionPayload,
+  SelectionTarget,
 } from "@/lib/types";
 
 const changedFileSchema = z.object({
@@ -284,25 +287,41 @@ function normalizeAiPatchResponseShape(value: unknown): z.infer<typeof aiPatchRe
 
 function buildCommonContentBlocks(params: {
   prompt: string;
+  editMode: EditMode;
   selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
   contextFiles: ContextFile[];
   attachments: AnthropicAttachment[];
   currentFilePath?: string;
   allowedPaths?: string[];
+  contextSummary?: string | null;
+  activeKitSummaries?: string[];
 }): Anthropic.Messages.ContentBlockParam[] {
   const contentBlocks: Anthropic.Messages.ContentBlockParam[] = [
     {
       type: "text",
       text: [
         `User prompt: ${params.prompt}`,
+        `Edit mode: ${params.editMode}`,
+        `Edit plan: ${JSON.stringify(params.editPlan, null, 2)}`,
         `Selected element: ${
           params.selection
             ? JSON.stringify(params.selection, null, 2)
             : "No element is currently selected."
         }`,
+        `Semantic target: ${
+          params.selectionTarget
+            ? JSON.stringify(params.selectionTarget, null, 2)
+            : "No semantic target available."
+        }`,
         ...(params.currentFilePath ? [`Active file: ${params.currentFilePath}`] : []),
         ...(params.allowedPaths?.length
           ? [`Allowed file paths: ${params.allowedPaths.join(", ")}`]
+          : []),
+        ...(params.contextSummary ? [`Context memory:\n${params.contextSummary}`] : []),
+        ...(params.activeKitSummaries?.length
+          ? [`Active kits:\n- ${params.activeKitSummaries.join("\n- ")}`]
           : []),
         "Relevant source files:",
         ...params.contextFiles.map(
@@ -346,14 +365,20 @@ function buildCommonContentBlocks(params: {
 export async function requestAiEdit(params: {
   model?: string;
   prompt: string;
+  editMode: EditMode;
   selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
   currentFilePath?: string;
   contextFiles: ContextFile[];
+  contextSummary?: string | null;
+  activeKitSummaries?: string[];
   attachments: AnthropicAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
   changedFiles: AiChangedFile[];
+  rawResponse: string | null;
 }> {
   const client = getAnthropicClient();
 
@@ -368,6 +393,7 @@ export async function requestAiEdit(params: {
     "Do not rename files, change relative import paths, or change export/import symbol names unless the user explicitly asks for that refactor.",
     "Preserve existing file paths and module wiring by default.",
     "Keep Tailwind and existing styling conventions intact unless the prompt explicitly asks for a larger redesign.",
+    "Treat the provided edit plan and semantic target as hard constraints unless the prompt explicitly broadens the scope.",
     ...(isStaticOverrideContext(params) ? staticOverrideInstructions() : []),
   ].join("\n");
 
@@ -393,20 +419,27 @@ export async function requestAiEdit(params: {
   return {
     ...parsed,
     changedFiles: normalizeChangedFiles(parsed.changedFiles, params.currentFilePath),
+    rawResponse: responseText,
   };
 }
 
 export async function requestAnthropicPatchEdit(params: {
   model?: string;
   prompt: string;
+  editMode: EditMode;
   selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
   currentFilePath: string;
   contextFiles: ContextFile[];
+  contextSummary?: string | null;
+  activeKitSummaries?: string[];
   attachments: AnthropicAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
   operations: Array<{ path: string; search: string; replace: string; reason?: string }>;
+  rawResponse: string | null;
 }> {
   const client = getAnthropicClient();
   const allowedPaths = Array.from(
@@ -424,6 +457,7 @@ export async function requestAnthropicPatchEdit(params: {
     "Each search value must be copied exactly from the provided source snippets.",
     "Use an empty string in replace to remove content.",
     "Prefer 1-3 targeted operations.",
+    "Honor the provided edit plan and semantic target when choosing search/replace operations.",
   ].join("\n");
 
   const response = await client.messages.create({
@@ -451,6 +485,7 @@ export async function requestAnthropicPatchEdit(params: {
   return {
     ...parsed,
     operations: normalizePatchOperations(parsed.operations, params.currentFilePath),
+    rawResponse: responseText,
   };
 }
 

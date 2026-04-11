@@ -31,8 +31,8 @@ interface PreviewRuntimeState {
   startPromises: Map<string, Promise<PreviewRunnerState>>;
 }
 
-const MAX_WARM_PREVIEW_RUNNERS = 2;
-const STALE_RUNNER_TTL_MS = 15 * 60 * 1000;
+const MAX_WARM_PREVIEW_RUNNERS = 4;
+const STALE_RUNNER_TTL_MS = 30 * 60 * 1000;
 
 declare global {
   // eslint-disable-next-line no-var

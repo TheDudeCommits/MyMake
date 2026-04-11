@@ -5,6 +5,26 @@ export type DevicePreset = "desktop" | "tablet" | "mobile";
 export type ProjectRuntime = "next" | "vite" | "static";
 export type AiProvider = "openai" | "anthropic";
 export type AiModelKey = "openai-chatgpt-5-2" | "anthropic-sonnet-4-6";
+export type EditMode = "precise" | "scoped" | "creative";
+export type MakeKitKind = "code" | "style" | "rules" | "reference";
+export type MakeKitSource = "system" | "user" | "imported";
+export type ContextSourceKind =
+  | "selection"
+  | "route"
+  | "component"
+  | "style"
+  | "memory"
+  | "kit"
+  | "attachment"
+  | "conversation"
+  | "active-file"
+  | "supporting";
+export type ValidationCheckStatus = "passed" | "failed" | "warning" | "skipped";
+export type ValidationStatus = "passed" | "failed" | "warning";
+export type ConversationTurnKind = "user" | "assistant" | "system";
+export type ConversationTurnStatus = "pending" | "applied" | "failed" | "info";
+export type EditStrategy = "direct-property" | "static-override" | "patch" | "rewrite";
+export type EditRisk = "low" | "medium" | "high";
 
 export interface ProjectRecord {
   id: string;
@@ -64,6 +84,10 @@ export interface SelectionPayload {
   classes: string[];
   outerHtml: string;
   boundingBox: BoundingBox;
+  role: string | null;
+  href: string | null;
+  src: string | null;
+  editableProperties: string[];
 }
 
 export interface FileNode {
@@ -88,13 +112,121 @@ export interface AiModelOption {
   enabled: boolean;
 }
 
+export interface EditableCapability {
+  key: string;
+  label: string;
+  confidence: number;
+}
+
+export interface SelectionTarget {
+  route: string;
+  label: string;
+  summary: string;
+  sourceFilePath: string | null;
+  componentName: string | null;
+  sectionName: string | null;
+  repeatGroup: string | null;
+  editableCapabilities: EditableCapability[];
+  payload: SelectionPayload;
+}
+
+export interface ContextSourceRecord {
+  kind: ContextSourceKind;
+  title: string;
+  path: string | null;
+  reason: string;
+  score: number;
+  excerpted: boolean;
+  relatedToSelection: boolean;
+  charCount: number;
+}
+
+export interface ContextSnapshotRecord {
+  id: string;
+  projectId: string;
+  revisionId: string | null;
+  turnId: string | null;
+  tokenBudget: number;
+  primaryTarget: string | null;
+  compressedMemory: string | null;
+  sources: ContextSourceRecord[];
+  createdAt: string;
+}
+
+export interface MakeKitRecord {
+  id: string;
+  projectId: string;
+  name: string;
+  kind: MakeKitKind;
+  source: MakeKitSource;
+  enabled: boolean;
+  priority: number;
+  summary: string;
+  lockedRules: string[];
+  softRules: string[];
+  assets: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ValidationResultRecord {
+  id: string;
+  projectId: string;
+  revisionId: string | null;
+  turnId: string | null;
+  status: ValidationStatus;
+  buildStatus: ValidationCheckStatus;
+  previewStatus: ValidationCheckStatus;
+  selectorStatus: ValidationCheckStatus;
+  importsStatus: ValidationCheckStatus;
+  designStatus: ValidationCheckStatus;
+  warnings: string[];
+  details: string[];
+  rawProviderOutput: string | null;
+  retryable: boolean;
+  createdAt: string;
+}
+
+export interface ConversationTurnRecord {
+  id: string;
+  projectId: string;
+  revisionId: string | null;
+  kind: ConversationTurnKind;
+  status: ConversationTurnStatus;
+  prompt: string | null;
+  summary: string | null;
+  aiModelKey: AiModelKey | null;
+  provider: AiProvider | null;
+  editMode: EditMode | null;
+  selectionTarget: SelectionTarget | null;
+  changedFiles: TurnChangedFile[];
+  warnings: string[];
+  contextSnapshotId: string | null;
+  validationResultId: string | null;
+  createdAt: string;
+}
+
+export interface EditPlan {
+  mode: EditMode;
+  target: SelectionTarget | null;
+  strategy: EditStrategy;
+  risk: EditRisk;
+  candidateFiles: string[];
+  validationSet: string[];
+  rationale: string[];
+}
+
 export interface ProjectWorkspace {
   project: ProjectRecord;
   revisions: RevisionRecord[];
+  conversationTurns: ConversationTurnRecord[];
   attachments: AttachmentRecord[];
+  kits: MakeKitRecord[];
   fileTree: FileNode[];
   currentFilePath: string | null;
   currentFileContent: string | null;
+  latestContextSnapshot: ContextSnapshotRecord | null;
+  lastValidationResult: ValidationResultRecord | null;
   preview: PreviewDescriptor;
 }
 
@@ -112,6 +244,7 @@ export interface AiEditRequestPayload {
   prompt: string;
   selection: SelectionPayload | null;
   attachmentIds: string[];
+  editMode?: EditMode | null;
   aiModelKey?: AiModelKey | null;
   currentFilePath?: string | null;
 }
@@ -119,6 +252,11 @@ export interface AiEditRequestPayload {
 export interface AiChangedFile {
   path: string;
   content: string;
+  reason?: string;
+}
+
+export interface TurnChangedFile {
+  path: string;
   reason?: string;
 }
 

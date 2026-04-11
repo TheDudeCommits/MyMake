@@ -242,6 +242,20 @@ export function buildPreviewBridgeScript(projectId: string): string {
           attributes: attributeMap(element),
           classes: Array.from(element.classList),
           outerHtml: element.outerHTML.slice(0, 5000),
+          role: element.getAttribute("role"),
+          href: element instanceof HTMLAnchorElement ? element.href : element.getAttribute("href"),
+          src:
+            element instanceof HTMLImageElement
+              ? element.currentSrc || element.src
+              : element.getAttribute("src"),
+          editableProperties: [
+            ((element.textContent || "").trim() ? "text" : null),
+            ((element instanceof HTMLAnchorElement || element.hasAttribute("href")) ? "link" : null),
+            ((element instanceof HTMLImageElement || element.hasAttribute("src")) ? "image" : null),
+            (["button", "a"].includes(element.tagName.toLowerCase()) ? "spacing" : null),
+            "visibility",
+            "layout",
+          ].filter(Boolean),
           boundingBox: toBox(rect),
         };
       }

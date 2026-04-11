@@ -47,6 +47,75 @@ const SCHEMA_SQL = `
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS conversation_turns (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    revision_id TEXT,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    prompt TEXT,
+    summary TEXT,
+    ai_model_key TEXT,
+    provider TEXT,
+    edit_mode TEXT,
+    selection_target_json TEXT,
+    changed_files_json TEXT NOT NULL,
+    warnings_json TEXT NOT NULL,
+    context_snapshot_id TEXT,
+    validation_result_id TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS context_snapshots (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    revision_id TEXT,
+    turn_id TEXT,
+    token_budget INTEGER NOT NULL,
+    primary_target TEXT,
+    compressed_memory TEXT,
+    sources_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS make_kits (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    summary TEXT NOT NULL,
+    locked_rules_json TEXT NOT NULL,
+    soft_rules_json TEXT NOT NULL,
+    assets_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS validation_results (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    revision_id TEXT,
+    turn_id TEXT,
+    status TEXT NOT NULL,
+    build_status TEXT NOT NULL,
+    preview_status TEXT NOT NULL,
+    selector_status TEXT NOT NULL,
+    imports_status TEXT NOT NULL,
+    design_status TEXT NOT NULL,
+    warnings_json TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    raw_provider_output TEXT,
+    retryable INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  );
+
   CREATE INDEX IF NOT EXISTS idx_projects_last_opened_at
     ON projects(last_opened_at DESC);
 
@@ -55,7 +124,41 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_attachments_project_created_at
     ON attachments(project_id, created_at DESC);
+
+  CREATE INDEX IF NOT EXISTS idx_conversation_turns_project_created_at
+    ON conversation_turns(project_id, created_at ASC);
+
+  CREATE INDEX IF NOT EXISTS idx_context_snapshots_project_created_at
+    ON context_snapshots(project_id, created_at DESC);
+
+  CREATE INDEX IF NOT EXISTS idx_make_kits_project_priority
+    ON make_kits(project_id, priority DESC, updated_at DESC);
+
+  CREATE INDEX IF NOT EXISTS idx_validation_results_project_created_at
+    ON validation_results(project_id, created_at DESC);
 `;
+
+function ensureColumn(
+  db: Database.Database,
+  tableName: string,
+  columnName: string,
+  columnDefinition: string,
+): void {
+  const columns = db
+    .prepare(`PRAGMA table_info(${tableName})`)
+    .all() as Array<{ name: string }>;
+
+  if (columns.some((column) => column.name === columnName)) {
+    return;
+  }
+
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`);
+}
+
+function runMigrations(db: Database.Database): void {
+  ensureColumn(db, "projects", "last_opened_at", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "projects", "created_at", "TEXT NOT NULL DEFAULT ''");
+}
 
 export function getDb(): Database.Database {
   if (database) {
@@ -68,6 +171,7 @@ export function getDb(): Database.Database {
   database = new Database(dbPath);
   database.pragma("journal_mode = WAL");
   database.exec(SCHEMA_SQL);
+  runMigrations(database);
 
   return database;
 }

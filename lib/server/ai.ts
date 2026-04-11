@@ -1,4 +1,12 @@
-import type { AiModelKey, AiModelOption, AnthropicAttachment, SelectionPayload } from "@/lib/types";
+import type {
+  AiModelKey,
+  AiModelOption,
+  AnthropicAttachment,
+  EditMode,
+  EditPlan,
+  SelectionPayload,
+  SelectionTarget,
+} from "@/lib/types";
 import { getEnv } from "@/lib/server/env";
 import {
   requestAnthropicAiEdit,
@@ -65,14 +73,20 @@ function resolveAiModel(aiModelKey?: AiModelKey | null): ServerAiModelConfig {
 export async function requestAiEdit(params: {
   aiModelKey?: AiModelKey | null;
   prompt: string;
+  editMode: EditMode;
   selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
   currentFilePath?: string | null;
   contextFiles: ContextFile[];
+  contextSummary?: string | null;
+  activeKitSummaries?: string[];
   attachments: AnthropicAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
   changedFiles: Array<{ path: string; content: string; reason?: string }>;
+  rawResponse: string | null;
 }> {
   const model = resolveAiModel(params.aiModelKey);
 
@@ -80,9 +94,14 @@ export async function requestAiEdit(params: {
     return requestOpenAiEdit({
       model: model.apiModel,
       prompt: params.prompt,
+      editMode: params.editMode,
       selection: params.selection,
+      selectionTarget: params.selectionTarget,
+      editPlan: params.editPlan,
       currentFilePath: params.currentFilePath || undefined,
       contextFiles: params.contextFiles,
+      contextSummary: params.contextSummary,
+      activeKitSummaries: params.activeKitSummaries,
       attachments: params.attachments,
     });
   }
@@ -90,9 +109,14 @@ export async function requestAiEdit(params: {
   return requestAnthropicAiEdit({
     model: model.apiModel,
     prompt: params.prompt,
+    editMode: params.editMode,
     selection: params.selection,
+    selectionTarget: params.selectionTarget,
+    editPlan: params.editPlan,
     currentFilePath: params.currentFilePath || undefined,
     contextFiles: params.contextFiles,
+    contextSummary: params.contextSummary,
+    activeKitSummaries: params.activeKitSummaries,
     attachments: params.attachments,
   });
 }
@@ -100,14 +124,20 @@ export async function requestAiEdit(params: {
 export async function requestAiPatchEdit(params: {
   aiModelKey?: AiModelKey | null;
   prompt: string;
+  editMode: EditMode;
   selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
   currentFilePath: string;
   contextFiles: ContextFile[];
+  contextSummary?: string | null;
+  activeKitSummaries?: string[];
   attachments: AnthropicAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
   operations: Array<{ path: string; search: string; replace: string; reason?: string }>;
+  rawResponse: string | null;
 }> {
   const model = resolveAiModel(params.aiModelKey);
 
@@ -115,9 +145,14 @@ export async function requestAiPatchEdit(params: {
     return requestOpenAiPatchEdit({
       model: model.apiModel,
       prompt: params.prompt,
+      editMode: params.editMode,
       selection: params.selection,
+      selectionTarget: params.selectionTarget,
+      editPlan: params.editPlan,
       currentFilePath: params.currentFilePath,
       contextFiles: params.contextFiles,
+      contextSummary: params.contextSummary,
+      activeKitSummaries: params.activeKitSummaries,
       attachments: params.attachments,
     });
   }
@@ -125,9 +160,14 @@ export async function requestAiPatchEdit(params: {
   return requestAnthropicPatchEdit({
     model: model.apiModel,
     prompt: params.prompt,
+    editMode: params.editMode,
     selection: params.selection,
+    selectionTarget: params.selectionTarget,
+    editPlan: params.editPlan,
     currentFilePath: params.currentFilePath,
     contextFiles: params.contextFiles,
+    contextSummary: params.contextSummary,
+    activeKitSummaries: params.activeKitSummaries,
     attachments: params.attachments,
   });
 }

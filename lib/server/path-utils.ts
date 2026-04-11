@@ -6,6 +6,7 @@ import type { FileNode } from "@/lib/types";
 
 const IGNORED_DIRECTORIES = new Set([
   ".git",
+  ".mymake",
   ".next",
   "node_modules",
   "__MACOSX",

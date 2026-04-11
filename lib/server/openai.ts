@@ -5,7 +5,10 @@ import { getEnv } from "@/lib/server/env";
 import type {
   AiChangedFile,
   AnthropicAttachment,
+  EditMode,
+  EditPlan,
   SelectionPayload,
+  SelectionTarget,
 } from "@/lib/types";
 import type { ContextFile } from "@/lib/server/anthropic";
 
@@ -184,10 +187,15 @@ function normalizePatchOperations(
 
 function buildCommonContent(params: {
   prompt: string;
+  editMode: EditMode;
   selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
   contextFiles: ContextFile[];
   attachments: AnthropicAttachment[];
   currentFilePath?: string;
+  contextSummary?: string | null;
+  activeKitSummaries?: string[];
 }) {
   const content: Array<
     | { type: "text"; text: string }
@@ -197,12 +205,23 @@ function buildCommonContent(params: {
       type: "text",
       text: [
         `User prompt: ${params.prompt}`,
+        `Edit mode: ${params.editMode}`,
+        `Edit plan: ${JSON.stringify(params.editPlan, null, 2)}`,
         `Selected element: ${
           params.selection
             ? JSON.stringify(params.selection, null, 2)
             : "No element is currently selected."
         }`,
+        `Semantic target: ${
+          params.selectionTarget
+            ? JSON.stringify(params.selectionTarget, null, 2)
+            : "No semantic target available."
+        }`,
         ...(params.currentFilePath ? [`Active file: ${params.currentFilePath}`] : []),
+        ...(params.contextSummary ? [`Context memory:\n${params.contextSummary}`] : []),
+        ...(params.activeKitSummaries?.length
+          ? [`Active kits:\n- ${params.activeKitSummaries.join("\n- ")}`]
+          : []),
         "Relevant source files:",
         ...params.contextFiles.map(
           (file) => `\n### ${file.path} (${file.reason})\n${file.content}`,
@@ -238,14 +257,20 @@ function buildCommonContent(params: {
 export async function requestOpenAiEdit(params: {
   model: string;
   prompt: string;
+  editMode: EditMode;
   selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
   currentFilePath?: string;
   contextFiles: ContextFile[];
+  contextSummary?: string | null;
+  activeKitSummaries?: string[];
   attachments: AnthropicAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
   changedFiles: AiChangedFile[];
+  rawResponse: string | null;
 }> {
   const client = getOpenAiClient();
 
@@ -258,6 +283,7 @@ export async function requestOpenAiEdit(params: {
     "Do not rename files, change relative import paths, or change export/import symbol names unless the user explicitly asks for that refactor.",
     "Preserve existing file paths and module wiring by default.",
     "Keep Tailwind and existing styling conventions intact unless the prompt explicitly asks for a larger redesign.",
+    "Treat the provided edit plan and semantic target as hard constraints unless the prompt explicitly broadens the scope.",
     ...(isStaticOverrideContext(params) ? staticOverrideInstructions() : []),
   ].join("\n");
 
@@ -293,20 +319,27 @@ export async function requestOpenAiEdit(params: {
   return {
     ...parsed,
     changedFiles: normalizeChangedFiles(parsed.changedFiles, params.currentFilePath),
+    rawResponse: responseText,
   };
 }
 
 export async function requestOpenAiPatchEdit(params: {
   model: string;
   prompt: string;
+  editMode: EditMode;
   selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
   currentFilePath: string;
   contextFiles: ContextFile[];
+  contextSummary?: string | null;
+  activeKitSummaries?: string[];
   attachments: AnthropicAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
   operations: Array<{ path: string; search: string; replace: string; reason?: string }>;
+  rawResponse: string | null;
 }> {
   const client = getOpenAiClient();
   const allowedPaths = Array.from(
@@ -322,6 +355,7 @@ export async function requestOpenAiPatchEdit(params: {
     "Each search value must be copied exactly from the provided source snippets.",
     "Prefer 1-3 targeted operations.",
     "Use an empty string in replace when the user wants content removed.",
+    "Honor the provided edit plan and semantic target when choosing search/replace operations.",
   ].join("\n");
 
   const response = await client.chat.completions.create({
@@ -362,5 +396,6 @@ export async function requestOpenAiPatchEdit(params: {
   return {
     ...parsed,
     operations: normalizePatchOperations(parsed.operations, params.currentFilePath),
+    rawResponse: responseText,
   };
 }

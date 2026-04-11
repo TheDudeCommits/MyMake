@@ -21,6 +21,10 @@ const selectionSchema = z
     attributes: z.record(z.string(), z.string()),
     classes: z.array(z.string()),
     outerHtml: z.string(),
+    role: z.string().nullable(),
+    href: z.string().nullable(),
+    src: z.string().nullable(),
+    editableProperties: z.array(z.string()).default([]),
     boundingBox: z.object({
       x: z.number(),
       y: z.number(),
@@ -36,6 +40,7 @@ const bodySchema = z.object({
   prompt: z.string().min(1),
   selection: selectionSchema,
   attachmentIds: z.array(z.string()).default([]),
+  editMode: z.enum(["precise", "scoped", "creative"]).nullable().optional(),
   aiModelKey: z.enum(["openai-chatgpt-5-2", "anthropic-sonnet-4-6"]).nullable().optional(),
   currentFilePath: z.string().nullable().optional(),
 });
