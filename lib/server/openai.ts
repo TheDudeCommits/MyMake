@@ -12,7 +12,7 @@ import type { ContextFile } from "@/lib/server/anthropic";
 const changedFileSchema = z.object({
   path: z.string().min(1),
   content: z.string(),
-  reason: z.string().optional(),
+  reason: z.string().nullable(),
 });
 
 const aiResponseSchema = z.object({
@@ -41,7 +41,7 @@ const aiJsonSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["path", "content"],
+        required: ["path", "content", "reason"],
         properties: {
           path: {
             type: "string",
@@ -50,7 +50,7 @@ const aiJsonSchema = {
             type: "string",
           },
           reason: {
-            type: "string",
+            type: ["string", "null"],
           },
         },
       },
@@ -158,5 +158,14 @@ export async function requestOpenAiEdit(params: {
     throw new Error("OpenAI returned an empty response for this edit request.");
   }
 
-  return aiResponseSchema.parse(JSON.parse(responseText));
+  const parsed = aiResponseSchema.parse(JSON.parse(responseText));
+
+  return {
+    ...parsed,
+    changedFiles: parsed.changedFiles.map((file) => ({
+      path: file.path,
+      content: file.content,
+      ...(file.reason ? { reason: file.reason } : {}),
+    })),
+  };
 }
