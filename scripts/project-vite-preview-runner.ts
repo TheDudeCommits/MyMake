@@ -22,28 +22,24 @@ async function main() {
 
   const requireFromProject = createRequire(path.join(projectDir, "package.json"));
   const viteEntry = requireFromProject.resolve("vite");
-  const viteModule = (await import(pathToFileURL(viteEntry).href)) as {
-    createServer: (config: Record<string, unknown>) => Promise<{
+  const importedViteModule = (await import(pathToFileURL(viteEntry).href)) as {
+    default?: {
+      createServer?: (config: Record<string, unknown>) => Promise<{
+        listen: () => Promise<void>;
+        resolvedUrls?: { local?: string[] };
+      }>;
+    };
+    createServer?: (config: Record<string, unknown>) => Promise<{
       listen: () => Promise<void>;
       resolvedUrls?: { local?: string[] };
     }>;
-    loadConfigFromFile: (
-      env: Record<string, unknown>,
-      configFile?: string,
-      configRoot?: string,
-    ) => Promise<{ config: Record<string, unknown> } | null>;
-    mergeConfig: (
-      defaults: Record<string, unknown>,
-      overrides: Record<string, unknown>,
-    ) => Record<string, unknown>;
   };
+  const createServer =
+    importedViteModule.createServer ?? importedViteModule.default?.createServer;
 
-  const configEnv = {
-    command: "serve",
-    mode: "development",
-    isSsrBuild: false,
-    isPreview: false,
-  };
+  if (!createServer) {
+    throw new Error("Could not access Vite's createServer API for this project.");
+  }
 
   const configCandidates = [
     "vite.config.ts",
@@ -56,15 +52,10 @@ async function main() {
   const configFile = configCandidates.find((candidate) =>
     fs.existsSync(path.join(projectDir, candidate)),
   );
-
-  const loadedConfig = await viteModule.loadConfigFromFile(
-    configEnv,
-    configFile ? path.join(projectDir, configFile) : undefined,
-    projectDir,
-  );
-
-  const previewConfig = viteModule.mergeConfig(loadedConfig?.config ?? {}, {
+  const previewConfig: Record<string, unknown> = {
     root: projectDir,
+    mode: "development",
+    configFile: configFile ? path.join(projectDir, configFile) : undefined,
     server: {
       host: "127.0.0.1",
       port,
@@ -73,9 +64,9 @@ async function main() {
         path: `/preview/${projectId}/`,
       },
     },
-  });
+  };
 
-  const server = await viteModule.createServer(previewConfig);
+  const server = await createServer(previewConfig);
   await server.listen();
 
   const localUrl = server.resolvedUrls?.local?.[0] || `http://127.0.0.1:${port}`;
