@@ -293,6 +293,97 @@ async function readFileIfText(projectDir: string, relativePath: string): Promise
   return fs.readFile(absolutePath, "utf8");
 }
 
+const IMPORTABLE_EXTENSIONS = [
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".css",
+  ".scss",
+  ".sass",
+  ".json",
+];
+
+function collectRelativeImports(content: string): string[] {
+  const imports = new Set<string>();
+  const patterns = [
+    /(?:import|export)\s+(?:[^"'`]*?\sfrom\s*)?["'](\.{1,2}\/[^"'`]+)["']/g,
+    /import\(\s*["'](\.{1,2}\/[^"'`]+)["']\s*\)/g,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of content.matchAll(pattern)) {
+      if (match[1]) {
+        imports.add(match[1]);
+      }
+    }
+  }
+
+  return [...imports];
+}
+
+function importResolutionCandidates(baseFilePath: string, specifier: string): string[] {
+  const normalizedBase = toPosixPath(baseFilePath);
+  const fromDirectory = path.posix.dirname(normalizedBase);
+  const joined = path.posix.normalize(path.posix.join(fromDirectory, specifier));
+  const extension = path.posix.extname(joined);
+
+  if (extension) {
+    return [joined];
+  }
+
+  return [
+    ...IMPORTABLE_EXTENSIONS.map((candidateExtension) => `${joined}${candidateExtension}`),
+    ...IMPORTABLE_EXTENSIONS.map(
+      (candidateExtension) => `${joined}/index${candidateExtension}`,
+    ),
+  ];
+}
+
+async function validateChangedFileImports(
+  projectDir: string,
+  changedFiles: Array<{ path: string; content: string }>,
+): Promise<void> {
+  const changedFileMap = new Map(
+    changedFiles.map((file) => [toPosixPath(file.path), file.content]),
+  );
+
+  for (const file of changedFiles) {
+    const normalizedFilePath = toPosixPath(file.path);
+    if (!/\.(tsx?|jsx?|mjs|cjs)$/i.test(normalizedFilePath)) {
+      continue;
+    }
+
+    for (const specifier of collectRelativeImports(file.content)) {
+      const candidates = importResolutionCandidates(normalizedFilePath, specifier);
+      let resolved = false;
+
+      for (const candidate of candidates) {
+        if (changedFileMap.has(candidate)) {
+          resolved = true;
+          break;
+        }
+
+        try {
+          await fs.access(resolveInsideRoot(projectDir, candidate));
+          resolved = true;
+          break;
+        } catch {
+          // Keep checking candidate paths.
+        }
+      }
+
+      if (!resolved) {
+        throw new Error(
+          `AI edit would break ${normalizedFilePath}: relative import "${specifier}" does not resolve to a file in the project.`,
+        );
+      }
+    }
+  }
+}
+
 function getRouteCandidates(route: string): string[] {
   const normalizedRoute = route === "/" ? "" : route.replace(/^\/+|\/+$/g, "");
   const parts = normalizedRoute ? normalizedRoute.split("/") : [];
@@ -829,6 +920,8 @@ export async function applyAiEdit(
     contextFiles,
     attachments,
   });
+
+  await validateChangedFileImports(project.extractedPath, aiResult.changedFiles);
 
   const changedPaths: string[] = [];
   for (const change of aiResult.changedFiles) {

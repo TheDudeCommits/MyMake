@@ -86,6 +86,8 @@ export async function requestOpenAiEdit(params: {
     "Always return full file contents for every changed file.",
     "Prefer minimal, local edits that preserve the project architecture.",
     "Do not reference files that are not included in changedFiles.",
+    "Do not rename files, change relative import paths, or change export/import symbol names unless the user explicitly asks for that refactor.",
+    "Preserve existing file paths and module wiring by default.",
     "Keep Tailwind and existing styling conventions intact unless the prompt explicitly asks for a larger redesign.",
   ].join("\n");
 
