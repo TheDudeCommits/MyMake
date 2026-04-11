@@ -1087,13 +1087,6 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       return;
     }
 
-    const confirmed = window.confirm(
-      `Remove "${targetProject.name}" from MyMake? This deletes its uploaded files, checkpoints, and attachments.`,
-    );
-    if (!confirmed) {
-      return;
-    }
-
     try {
       setError(null);
       setFeedback(`Removing ${targetProject.name}...`);
