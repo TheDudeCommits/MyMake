@@ -384,6 +384,43 @@ async function validateChangedFileImports(
   }
 }
 
+async function validateProjectImports(projectDir: string): Promise<void> {
+  const projectFiles = await listProjectFiles(projectDir);
+
+  for (const filePath of projectFiles) {
+    const normalizedFilePath = toPosixPath(filePath);
+    if (!/\.(tsx?|jsx?|mjs|cjs)$/i.test(normalizedFilePath)) {
+      continue;
+    }
+
+    const content = await readFileIfText(projectDir, normalizedFilePath);
+    if (!content) {
+      continue;
+    }
+
+    for (const specifier of collectRelativeImports(content)) {
+      const candidates = importResolutionCandidates(normalizedFilePath, specifier);
+      let resolved = false;
+
+      for (const candidate of candidates) {
+        try {
+          await fs.access(resolveInsideRoot(projectDir, candidate));
+          resolved = true;
+          break;
+        } catch {
+          // Keep checking candidate paths.
+        }
+      }
+
+      if (!resolved) {
+        throw new Error(
+          `Checkpoint restore would break ${normalizedFilePath}: relative import "${specifier}" does not resolve to a file in the project.`,
+        );
+      }
+    }
+  }
+}
+
 function getRouteCandidates(route: string): string[] {
   const normalizedRoute = route === "/" ? "" : route.replace(/^\/+|\/+$/g, "");
   const parts = normalizedRoute ? normalizedRoute.split("/") : [];
@@ -938,7 +975,7 @@ export async function applyAiEdit(
 
   await createRevision({
     projectId: payload.projectId,
-    label: payload.prompt.slice(0, 72),
+    label: payload.prompt.trim(),
     source: "ai",
     summary: aiResult.summary,
   });
@@ -963,23 +1000,75 @@ async function switchToRevision(
   targetRevision: RevisionRecord,
 ): Promise<ProjectWorkspace> {
   const project = getProjectRow(projectId);
-  await syncSnapshotToCurrent(targetRevision.snapshotPath, project.extractedPath);
+  const currentRevision = project.currentRevisionId
+    ? getRevisionById(project.currentRevisionId)
+    : null;
 
-  const restoredManifestHash = await readManifestHash(project.extractedPath);
-  if (restoredManifestHash !== project.manifestHash) {
-    await installDependencies(project.extractedPath, project.packageManager);
+  if (currentRevision?.id === targetRevision.id) {
+    return getWorkspaceSnapshot(projectId, { ensurePreview: false });
   }
 
-  getDb()
-    .prepare(
-      `UPDATE projects
-          SET current_revision_id = ?, manifest_hash = ?, last_opened_at = ?
-        WHERE id = ?`,
-    )
-    .run(targetRevision.id, restoredManifestHash, nowIso(), projectId);
+  try {
+    await syncSnapshotToCurrent(targetRevision.snapshotPath, project.extractedPath);
+    await validateProjectImports(project.extractedPath);
 
-  await restartPreviewRunner(projectId);
-  return getWorkspaceSnapshot(projectId, { ensurePreview: false });
+    const restoredManifestHash = await readManifestHash(project.extractedPath);
+    if (restoredManifestHash !== project.manifestHash) {
+      await installDependencies(project.extractedPath, project.packageManager);
+    }
+
+    await restartPreviewRunner(projectId);
+    getDb()
+      .prepare(
+        `UPDATE projects
+            SET current_revision_id = ?, manifest_hash = ?, status = ?, last_opened_at = ?
+          WHERE id = ?`,
+      )
+      .run(targetRevision.id, restoredManifestHash, "ready", nowIso(), projectId);
+
+    return getWorkspaceSnapshot(projectId, { ensurePreview: false });
+  } catch (error) {
+    if (currentRevision) {
+      await syncSnapshotToCurrent(currentRevision.snapshotPath, project.extractedPath);
+
+      const rollbackManifestHash = await readManifestHash(project.extractedPath);
+      if (rollbackManifestHash !== project.manifestHash) {
+        await installDependencies(project.extractedPath, project.packageManager);
+      }
+
+      getDb()
+        .prepare(
+          `UPDATE projects
+              SET current_revision_id = ?, manifest_hash = ?, status = ?, last_opened_at = ?
+            WHERE id = ?`,
+        )
+        .run(currentRevision.id, rollbackManifestHash, project.status, nowIso(), projectId);
+
+      try {
+        await restartPreviewRunner(projectId);
+      } catch {
+        // Best effort rollback. Surface the original restore error below.
+      }
+    }
+
+    const checkpointNumber = targetRevision.sequence + 1;
+    const reason = error instanceof Error ? error.message : "Restore failed.";
+    throw new Error(
+      `Could not restore Checkpoint ${checkpointNumber}. MyMake rolled the project back to the last working revision. ${reason}`,
+    );
+  }
+}
+
+export async function restoreProjectRevision(
+  projectId: string,
+  revisionId: string,
+): Promise<ProjectWorkspace> {
+  const targetRevision = getRevisionById(revisionId);
+  if (targetRevision.projectId !== projectId) {
+    throw new Error("That checkpoint does not belong to this project.");
+  }
+
+  return switchToRevision(projectId, targetRevision);
 }
 
 export async function undoProject(projectId: string): Promise<ProjectWorkspace> {

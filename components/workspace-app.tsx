@@ -46,6 +46,8 @@ const DEVICE_PRESETS: Record<
 
 const DEVICE_ORDER: DevicePreset[] = ["desktop", "tablet", "mobile"];
 const AI_MODEL_STORAGE_KEY = "mymake-selected-ai-model";
+const EMPTY_REVISIONS: RevisionRecord[] = [];
+const EMPTY_ATTACHMENTS: AttachmentRecord[] = [];
 
 type SnapshotResponse = DashboardSnapshot & {
   ai?: {
@@ -130,12 +132,56 @@ function shortAiModelLabel(model: AiModelOption): string {
   return model.label;
 }
 
-function describeRevision(revision: RevisionRecord | null | undefined): string {
-  if (!revision) {
-    return "No saved revisions yet.";
+function checkpointLabel(revision: RevisionRecord): string {
+  return `Checkpoint ${String(revision.sequence + 1).padStart(2, "0")}`;
+}
+
+function revisionSummaryText(revision: RevisionRecord): string {
+  if (revision.summary) {
+    return revision.summary;
   }
 
-  return revision.summary || `${revision.label} saved from ${revision.source}.`;
+  if (revision.source === "upload") {
+    return "Imported the project and created the first working checkpoint.";
+  }
+
+  if (revision.source === "manual") {
+    return "Saved a manual code edit and synced the preview.";
+  }
+
+  if (revision.source === "undo") {
+    return "Moved back to an earlier checkpoint.";
+  }
+
+  if (revision.source === "redo") {
+    return "Moved forward to a later checkpoint.";
+  }
+
+  return "Applied a new AI-assisted design change.";
+}
+
+function revisionSpeakerLabel(revision: RevisionRecord): string {
+  if (revision.source === "manual") {
+    return "You in code";
+  }
+
+  if (revision.source === "upload") {
+    return "MyMake";
+  }
+
+  return "MyMake AI";
+}
+
+function revisionPromptText(revision: RevisionRecord): string | null {
+  if (revision.source === "ai") {
+    return revision.label;
+  }
+
+  if (revision.source === "manual") {
+    return `Saved ${revision.label.replace(/^Saved\s+/i, "")}`;
+  }
+
+  return null;
 }
 
 function StatusPill({ status }: { status: ProjectWorkspace["project"]["status"] }) {
@@ -337,14 +383,19 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const [isPreviewSlow, setIsPreviewSlow] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const leftRailScrollRef = useRef<HTMLDivElement>(null);
   const projectUploadInputRef = useRef<HTMLInputElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const previousPreviewIdentityRef = useRef<string | null>(null);
   const previousRevisionIdRef = useRef<string | null>(null);
 
   const currentProject = snapshot.currentProject;
-  const revisions = currentProject?.revisions || [];
-  const attachments = currentProject?.attachments || [];
+  const revisions = currentProject?.revisions ?? EMPTY_REVISIONS;
+  const orderedRevisions = useMemo(
+    () => [...revisions].sort((left, right) => left.sequence - right.sequence),
+    [revisions],
+  );
+  const attachments = currentProject?.attachments ?? EMPTY_ATTACHMENTS;
   const currentDevice = DEVICE_PRESETS[devicePreset];
   const displayRoute = routeLabel(currentRoute);
   const hasUnsavedEdits = Boolean(editorFilePath && editorContent !== editorBaselineContent);
@@ -373,6 +424,15 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
         : [],
     [currentProject],
   );
+  const currentRevision = useMemo(
+    () =>
+      currentProject?.project.currentRevisionId
+        ? revisions.find((revision) => revision.id === currentProject.project.currentRevisionId) ||
+          null
+        : null,
+    [currentProject?.project.currentRevisionId, revisions],
+  );
+  const currentCheckpointLabel = currentRevision ? checkpointLabel(currentRevision) : "Version 1";
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -416,6 +476,15 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     setSelectedElement(null);
     setCurrentRoute("/");
   }, [currentProject?.project.id]);
+
+  useEffect(() => {
+    const rail = leftRailScrollRef.current;
+    if (!rail) {
+      return;
+    }
+
+    rail.scrollTop = rail.scrollHeight;
+  }, [currentProject?.project.id, currentProject?.project.currentRevisionId, orderedRevisions.length]);
 
   useEffect(() => {
     if (!previewIdentity) {
@@ -714,6 +783,8 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     }
 
     try {
+      setError(null);
+      setFeedback(action === "undo" ? "Restoring the previous checkpoint..." : "Restoring the next checkpoint...");
       const response = await fetch(`/api/projects/${currentProject.project.id}/history`, {
         method: "POST",
         headers: {
@@ -723,9 +794,38 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       });
       const data = await readJsonResponse<SnapshotResponse>(response);
       applySnapshot(data);
-      setFeedback(action === "undo" ? "Moved one revision back." : "Moved one revision forward.");
+      setSelectedElement(null);
+      setIsPicking(false);
+      setFeedback(action === "undo" ? "Moved back to the previous checkpoint." : "Moved forward to the next checkpoint.");
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "History update failed.");
+    }
+  }
+
+  async function handleRestoreRevision(revision: RevisionRecord) {
+    if (!currentProject) {
+      return;
+    }
+
+    try {
+      setError(null);
+      setFeedback(`Restoring ${checkpointLabel(revision)}...`);
+      const response = await fetch(`/api/projects/${currentProject.project.id}/history`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ revisionId: revision.id }),
+      });
+      const data = await readJsonResponse<SnapshotResponse>(response);
+      applySnapshot(data);
+      setSelectedElement(null);
+      setIsPicking(false);
+      setFeedback(`Restored ${checkpointLabel(revision)}.`);
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error ? caughtError.message : "Could not restore this checkpoint.",
+      );
     }
   }
 
@@ -784,25 +884,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       selectedAiModel?.enabled,
   );
   const composerNotice = error || feedback;
-  const latestRevision = revisions[0] || null;
   const showPreviewOverlay = Boolean(currentProject && (!isPreviewFrameReady || isPreviewStarting));
-
-  const reasoningBullets = useMemo(() => {
-    if (!currentProject) {
-      return [
-        "Upload a React frontend zip to start a live preview workspace.",
-        "Pick a layer in the canvas, then send changes from the composer below.",
-      ];
-    }
-
-    return [
-      `Preview is focused on /${displayRoute} for ${currentProject.project.name}.`,
-      selectedElement
-        ? `The next AI change will target ${selectedElement.tagName.toLowerCase()} on ${selectedElement.route}.`
-        : "Turn on the picker and click a layer in the preview to target a specific element.",
-      `${revisions.length} revision${revisions.length === 1 ? "" : "s"} saved and ${attachments.length} reference file${attachments.length === 1 ? "" : "s"} ready.`,
-    ];
-  }, [attachments.length, currentProject, displayRoute, revisions.length, selectedElement]);
 
   return (
     <main className="h-screen overflow-hidden bg-[#1f2023] text-[#f2f2f4]">
@@ -847,7 +929,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
               className="inline-flex h-9 items-center gap-2 rounded-[12px] border border-white/[0.08] bg-[#2a2b2f] px-3 text-sm text-slate-300 transition hover:bg-[#303238]"
               type="button"
             >
-              Version 1
+              {currentCheckpointLabel}
               <div className="rotate-90 text-slate-500">
                 <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5">
                   <path d="M6 3L11 8L6 13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -910,20 +992,56 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
         <div className="grid min-h-0 flex-1 grid-cols-[336px_minmax(0,1fr)]">
           <aside className="flex min-h-0 flex-col border-r border-white/[0.08] bg-[#2b2928]">
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4">
+            <div ref={leftRailScrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4">
               <div className="space-y-4">
-                <div>
-                  <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.24em] text-slate-500">
-                    <Sparkles className="h-3.5 w-3.5" />
-                    Reasoning
+                <div className="rounded-[16px] border border-white/[0.08] bg-[#2f2d2c] p-3.5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-[#8fd08f]">
+                        {currentProject?.project.name || "No design project"}
+                      </p>
+                      <p className="mt-1 text-sm text-[#a1a2a7]">
+                        {currentProject ? currentCheckpointLabel : "Upload a project to begin"}
+                      </p>
+                    </div>
+                    <button
+                      className="rounded-full px-2 py-1 text-sm text-slate-400 transition hover:bg-white/[0.06]"
+                      type="button"
+                      onClick={() => setIsCodePanelOpen((value) => !value)}
+                    >
+                      ...
+                    </button>
                   </div>
-                  <div className="mt-3 space-y-3 text-[12.5px] leading-6 text-[#dedee2]">
-                    {reasoningBullets.map((bullet) => (
-                      <div key={bullet} className="flex gap-2">
-                        <span className="pt-1 text-[9px] text-[#aeb0b8]">•</span>
-                        <p>{bullet}</p>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    {currentProject ? <StatusPill status={currentProject.project.status} /> : null}
+                    {currentProject ? (
+                      <span className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                        /{displayRoute}
+                      </span>
+                    ) : null}
+                    {currentProject ? (
+                      <span className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                        {formatTimestamp(currentProject.project.lastOpenedAt)}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="mt-3 rounded-[12px] border border-white/[0.08] bg-[#262628] px-3 py-3">
+                    <div className="flex items-center gap-2">
+                      <FileCode2 className="h-4 w-4 text-slate-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm text-slate-200">{editorFilePath || "No file selected"}</p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {editorFilePath
+                            ? hasUnsavedEdits
+                              ? "Unsaved changes in editor"
+                              : "Saved and synced"
+                            : "Open the code drawer to edit files"}
+                        </p>
                       </div>
-                    ))}
+                      {hasUnsavedEdits ? (
+                        <span className="text-xs font-medium text-[#8fd08f]">+1</span>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
 
@@ -948,57 +1066,75 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   </p>
                 </div>
 
-                <div className="rounded-[16px] border border-white/[0.08] bg-[#2f2d2c] px-3.5 py-3">
-                  <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Revision activity</p>
-                  <p className="mt-2 text-sm font-medium text-slate-100">
-                    {latestRevision ? latestRevision.label : "Waiting for first saved revision"}
-                  </p>
-                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
-                    {describeRevision(latestRevision)}
-                  </p>
-                </div>
-
-                <div className="rounded-[16px] border border-white/[0.08] bg-[#2f2d2c] p-3.5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-[#8fd08f]">
-                        {currentProject?.project.name || "No design project"}
-                      </p>
-                      <p className="mt-1 text-sm text-[#a1a2a7]">Version 1</p>
-                    </div>
-                    <button
-                      className="rounded-full px-2 py-1 text-sm text-slate-400 transition hover:bg-white/[0.06]"
-                      type="button"
-                      onClick={() => setIsCodePanelOpen((value) => !value)}
-                    >
-                      ...
-                    </button>
-                  </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    {currentProject ? <StatusPill status={currentProject.project.status} /> : null}
-                    {currentProject ? (
-                      <span className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
-                        {formatTimestamp(currentProject.project.lastOpenedAt)}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="mt-3 rounded-[12px] border border-white/[0.08] bg-[#262628] px-3 py-3">
+                <div>
+                  <div className="flex items-center justify-between gap-3 text-[11px] uppercase tracking-[0.24em] text-slate-500">
                     <div className="flex items-center gap-2">
-                      <FileCode2 className="h-4 w-4 text-slate-500" />
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm text-slate-200">{editorFilePath || "No file selected"}</p>
-                        <p className="mt-1 text-xs text-slate-500">
-                          {editorFilePath
-                            ? hasUnsavedEdits
-                              ? "Unsaved changes in editor"
-                              : "Saved and synced"
-                            : "Open the code drawer to edit files"}
-                        </p>
-                      </div>
-                      {hasUnsavedEdits ? (
-                        <span className="text-xs font-medium text-[#8fd08f]">+1</span>
-                      ) : null}
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Conversation
                     </div>
+                    <span>{orderedRevisions.length} checkpoints</span>
+                  </div>
+
+                  <div className="mt-3 space-y-3">
+                    {currentProject ? (
+                      orderedRevisions.map((revision) => {
+                        const promptText = revisionPromptText(revision);
+                        const isCurrentCheckpoint =
+                          currentProject.project.currentRevisionId === revision.id;
+
+                        return (
+                          <article key={revision.id} className="space-y-2">
+                            {promptText ? (
+                              <div className="flex justify-end">
+                                <div className="max-w-[88%] rounded-[18px] border border-[#5f62ff]/28 bg-[#5f62ff]/12 px-3.5 py-3 text-left">
+                                  <p className="text-[10px] uppercase tracking-[0.2em] text-[#cfd2ff]">
+                                    You
+                                  </p>
+                                  <p className="mt-1 text-sm leading-6 text-white">{promptText}</p>
+                                </div>
+                              </div>
+                            ) : null}
+
+                            <div className="rounded-[18px] border border-white/[0.08] bg-[#2f2d2c] px-3.5 py-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
+                                  {revisionSpeakerLabel(revision)}
+                                </p>
+                                <span className="rounded-full border border-white/[0.08] bg-[#262628] px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-400">
+                                  {checkpointLabel(revision)}
+                                </span>
+                              </div>
+                              <p className="mt-2 text-sm leading-6 text-[#e7e7ea]">
+                                {revisionSummaryText(revision)}
+                              </p>
+                              <div className="mt-3 flex items-center justify-between gap-3">
+                                <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                                  {formatTimestamp(revision.createdAt)}
+                                </p>
+                                <button
+                                  className={clsx(
+                                    "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium transition",
+                                    isCurrentCheckpoint
+                                      ? "cursor-default border-emerald-300/15 bg-emerald-300/10 text-emerald-100"
+                                      : "border-white/[0.08] bg-[#262628] text-slate-200 hover:bg-[#313136]",
+                                  )}
+                                  type="button"
+                                  disabled={isCurrentCheckpoint}
+                                  onClick={() => void handleRestoreRevision(revision)}
+                                >
+                                  <RefreshCcw className="h-3.5 w-3.5" />
+                                  {isCurrentCheckpoint ? "Current checkpoint" : "Restore checkpoint"}
+                                </button>
+                              </div>
+                            </div>
+                          </article>
+                        );
+                      })
+                    ) : (
+                      <div className="rounded-[16px] border border-dashed border-white/[0.08] bg-[#2f2d2c]/60 px-3.5 py-4 text-sm leading-6 text-slate-400">
+                        Upload a project, make edits, and every change will appear here as a numbered checkpoint with the prompt, AI response, and a restore button.
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
