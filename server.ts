@@ -73,6 +73,22 @@ function isPreviewWebSocketPath(url = ""): boolean {
   return url.startsWith("/?token=");
 }
 
+function resolvePreviewProjectId(request: {
+  mymakeProjectId?: string;
+  url?: string;
+  path?: string;
+  headers: {
+    referer?: string | string[];
+  };
+}): string | null {
+  return (
+    request.mymakeProjectId ||
+    getProjectIdFromPath(request.path || request.url || "") ||
+    getProjectIdFromReferer(request.headers.referer) ||
+    (isPreviewWebSocketPath(request.url || "") ? getActivePreviewProjectId() : null)
+  );
+}
+
 function getCookieValue(
   cookieHeader: string | string[] | undefined,
   name: string,
@@ -240,19 +256,21 @@ const previewDocumentProxy = createProxyMiddleware<Request, Response>({
   selfHandleResponse: true,
   logger: console,
   pathRewrite: (pathname, req) => {
-    const projectId = req.mymakeProjectId;
+    const projectId = resolvePreviewProjectId(req);
     if (!projectId) {
       return pathname;
     }
 
+    req.mymakeProjectId = projectId;
     return rewritePreviewPath(pathname, projectId);
   },
   router: async (req) => {
-    const projectId = req.mymakeProjectId;
+    const projectId = resolvePreviewProjectId(req);
     if (!projectId) {
       throw new Error("Missing preview project id.");
     }
 
+    req.mymakeProjectId = projectId;
     await ensurePreviewRunner(projectId);
     const target = await getPreviewTargetUrl(projectId);
     req.mymakePreviewTarget = target;
@@ -317,19 +335,21 @@ const previewStreamProxy = createProxyMiddleware<Request, Response>({
   logger: console,
   ws: true,
   pathRewrite: (pathname, req) => {
-    const projectId = req.mymakeProjectId;
+    const projectId = resolvePreviewProjectId(req);
     if (!projectId) {
       return pathname;
     }
 
+    req.mymakeProjectId = projectId;
     return rewritePreviewPath(pathname, projectId);
   },
   router: async (req) => {
-    const projectId = req.mymakeProjectId;
+    const projectId = resolvePreviewProjectId(req);
     if (!projectId) {
       throw new Error("Missing preview project id.");
     }
 
+    req.mymakeProjectId = projectId;
     await ensurePreviewRunner(projectId);
     const target = await getPreviewTargetUrl(projectId);
     req.mymakePreviewTarget = target;
@@ -398,11 +418,16 @@ app.prepare().then(() => {
   });
 
   httpServer.on("upgrade", async (req: IncomingMessage, socket: Socket, head: Buffer) => {
-    const projectId =
-      getProjectIdFromPath(req.url) ||
-      getProjectIdFromReferer(req.headers.referer) ||
-      (isPreviewWebSocketPath(req.url) ? getActivePreviewProjectId() : null);
+    const projectId = resolvePreviewProjectId(req as IncomingMessage & {
+      mymakeProjectId?: string;
+      path?: string;
+    });
     if (!projectId) {
+      if (isPreviewWebSocketPath(req.url || "")) {
+        socket.destroy();
+        return;
+      }
+
       await handleUpgrade(req, socket, head);
       return;
     }

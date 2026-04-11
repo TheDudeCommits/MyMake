@@ -126,7 +126,21 @@ function nextRunnerCommandArgs(projectDir: string, port: number): string[] {
   ];
 }
 
+function nextViteRunnerCommandArgs(projectDir: string, projectId: string, port: number): string[] {
+  return [
+    path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"),
+    path.join(process.cwd(), "scripts", "project-vite-preview-runner.ts"),
+    "--projectDir",
+    projectDir,
+    "--projectId",
+    projectId,
+    "--port",
+    String(port),
+  ];
+}
+
 async function getRunnerSpec(
+  projectId: string,
   projectDir: string,
   packageManager: PackageManager,
   port: number,
@@ -148,34 +162,13 @@ async function getRunnerSpec(
   }
 
   if (runtime === "vite") {
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      NODE_ENV: "development",
-      HOST: "127.0.0.1",
-      PORT: String(port),
-      BROWSER: "none",
-    };
-
-    if (packageManager === "pnpm") {
-      return {
-        command: "pnpm",
-        args: ["dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
-        env,
-      };
-    }
-
-    if (packageManager === "yarn") {
-      return {
-        command: "yarn",
-        args: ["dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
-        env,
-      };
-    }
-
     return {
-      command: "npm",
-      args: ["run", "dev", "--", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
-      env,
+      command: process.execPath,
+      args: nextViteRunnerCommandArgs(projectDir, projectId, port),
+      env: {
+        ...process.env,
+        NODE_ENV: "development",
+      },
     };
   }
 
@@ -288,7 +281,12 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
     await normalizeImportedProject(project.extracted_path);
     const port = project.preview_port || (await getAvailablePort());
     const targetUrl = `http://127.0.0.1:${port}`;
-    const runnerSpec = await getRunnerSpec(project.extracted_path, project.package_manager, port);
+    const runnerSpec = await getRunnerSpec(
+      projectId,
+      project.extracted_path,
+      project.package_manager,
+      port,
+    );
 
     const child = spawn(runnerSpec.command, runnerSpec.args, {
       cwd: project.extracted_path,
