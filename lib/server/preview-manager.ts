@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
 
 import { getDb } from "@/lib/server/db";
 import { detectProjectRuntime, normalizeImportedProject } from "@/lib/server/project-validation";
+import { getProjectPaths } from "@/lib/server/storage";
 import type { PackageManager } from "@/lib/types";
 
 type RunnerStatus = "starting" | "ready" | "error";
@@ -48,6 +50,15 @@ function getRuntimeState(): PreviewRuntimeState {
 function touchRunner(runner: PreviewRunnerState): void {
   runner.lastAccessedAt = Date.now();
   getRuntimeState().activeProjectId = runner.projectId;
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function getAvailablePort(): Promise<number> {
@@ -95,7 +106,7 @@ async function waitForRunner(targetUrl: string): Promise<void> {
 async function loadProject(projectId: string) {
   const row = getDb()
     .prepare(
-      `SELECT id, extracted_path, package_manager, preview_port
+      `SELECT id, extracted_path, package_manager, preview_port, manifest_hash
          FROM projects
         WHERE id = ?`,
     )
@@ -105,6 +116,7 @@ async function loadProject(projectId: string) {
         extracted_path: string;
         package_manager: PackageManager;
         preview_port: number | null;
+        manifest_hash: string | null;
       }
     | undefined;
 
@@ -113,6 +125,162 @@ async function loadProject(projectId: string) {
   }
 
   return row;
+}
+
+function installEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    NODE_ENV: "development",
+    npm_config_production: "false",
+    NPM_CONFIG_PRODUCTION: "false",
+    YARN_PRODUCTION: "false",
+  };
+}
+
+async function runInstallCommand(
+  command: string,
+  args: string[],
+  cwd: string,
+  label: string,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      env: installEnvironment(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      process.stdout.write(`[${label}] ${chunk}`);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+      process.stderr.write(`[${label}] ${chunk}`);
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`${label} failed with code ${code}: ${stderr}`));
+    });
+  });
+}
+
+async function installDependencies(projectDir: string, packageManager: PackageManager): Promise<void> {
+  if (packageManager === "pnpm") {
+    await runInstallCommand("pnpm", ["install", "--prod=false"], projectDir, "pnpm install");
+    return;
+  }
+
+  if (packageManager === "yarn") {
+    await runInstallCommand(
+      "yarn",
+      ["install", "--production=false"],
+      projectDir,
+      "yarn install",
+    );
+    return;
+  }
+
+  await runInstallCommand("npm", ["install", "--include=dev"], projectDir, "npm install");
+}
+
+function isNoSpaceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ENOSPC|no space left on device/i.test(message);
+}
+
+async function cleanupProjectInstallArtifacts(projectId: string): Promise<void> {
+  const paths = getProjectPaths(projectId);
+
+  await Promise.all([
+    fs.rm(path.join(paths.current, "node_modules"), { recursive: true, force: true }),
+    fs.rm(path.join(paths.current, ".next"), { recursive: true, force: true }),
+    fs.rm(path.join(paths.root, "unpacked"), { recursive: true, force: true }),
+  ]);
+
+  const rootEntries = await fs.readdir(paths.root).catch(() => [] as string[]);
+  await Promise.all(
+    rootEntries
+      .filter((entry) => /^export-\d+\.zip$/.test(entry))
+      .map((entry) =>
+        fs.rm(path.join(paths.root, entry), {
+          force: true,
+        }),
+      ),
+  );
+}
+
+export async function reclaimProjectInstallStorage(preferredProjectId: string): Promise<void> {
+  const rows = getDb()
+    .prepare(
+      `SELECT id
+         FROM projects
+        WHERE id != ?
+        ORDER BY last_opened_at ASC`,
+    )
+    .all(preferredProjectId) as Array<{ id: string }>;
+
+  for (const row of rows) {
+    await stopPreviewRunner(row.id).catch(() => undefined);
+    await cleanupProjectInstallArtifacts(row.id);
+  }
+}
+
+async function ensureProjectDependenciesInstalled(project: {
+  id: string;
+  extracted_path: string;
+  package_manager: PackageManager;
+  manifest_hash: string | null;
+}): Promise<void> {
+  const nodeModulesPath = path.join(project.extracted_path, "node_modules");
+  if (await pathExists(nodeModulesPath)) {
+    return;
+  }
+
+  getDb()
+    .prepare(
+      `UPDATE projects
+          SET status = ?, preview_port = NULL, last_opened_at = ?
+        WHERE id = ?`,
+    )
+    .run("installing", new Date().toISOString(), project.id);
+
+  try {
+    try {
+      await installDependencies(project.extracted_path, project.package_manager);
+    } catch (error) {
+      if (!isNoSpaceError(error)) {
+        throw error;
+      }
+
+      await cleanupProjectInstallArtifacts(project.id);
+      await reclaimProjectInstallStorage(project.id);
+      await installDependencies(project.extracted_path, project.package_manager);
+    }
+
+    getDb()
+      .prepare(
+        `UPDATE projects
+            SET status = ?, last_opened_at = ?
+          WHERE id = ?`,
+      )
+      .run("ready", new Date().toISOString(), project.id);
+  } catch (error) {
+    getDb()
+      .prepare(
+        `UPDATE projects
+            SET status = ?, preview_port = NULL, last_opened_at = ?
+          WHERE id = ?`,
+      )
+      .run("error", new Date().toISOString(), project.id);
+    throw error;
+  }
 }
 
 function nextRunnerCommandArgs(projectDir: string, port: number): string[] {
@@ -282,6 +450,7 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
 
     const project = await loadProject(projectId);
     await normalizeImportedProject(project.extracted_path);
+    await ensureProjectDependenciesInstalled(project);
     const port = project.preview_port || (await getAvailablePort());
     const targetUrl = `http://127.0.0.1:${port}`;
     const runnerSpec = await getRunnerSpec(

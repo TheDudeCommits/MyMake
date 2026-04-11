@@ -22,6 +22,7 @@ import {
 } from "@/lib/server/path-utils";
 import {
   ensurePreviewRunner,
+  reclaimProjectInstallStorage,
   getPreviewRunnerInfo,
   restartPreviewRunner,
   stopPreviewRunner,
@@ -256,6 +257,30 @@ async function installDependencies(projectDir: string, packageManager: PackageMa
   }
 
   await runCommand("npm", ["install", "--include=dev"], projectDir, "npm install", env);
+}
+
+function isNoSpaceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ENOSPC|no space left on device/i.test(message);
+}
+
+async function installDependenciesWithRecovery(
+  projectId: string,
+  projectDir: string,
+  packageManager: PackageManager,
+): Promise<void> {
+  try {
+    await installDependencies(projectDir, packageManager);
+  } catch (error) {
+    if (!isNoSpaceError(error)) {
+      throw error;
+    }
+
+    await fs.rm(path.join(projectDir, "node_modules"), { recursive: true, force: true });
+    await fs.rm(path.join(projectDir, ".next"), { recursive: true, force: true });
+    await reclaimProjectInstallStorage(projectId);
+    await installDependencies(projectDir, packageManager);
+  }
 }
 
 function defaultFileCandidates(files: string[]): string[] {
@@ -806,7 +831,7 @@ export async function createProjectFromUpload(
     );
 
   try {
-    await installDependencies(projectPaths.current, packageManager);
+    await installDependenciesWithRecovery(projectId, projectPaths.current, packageManager);
     const manifestHash = await readManifestHash(projectPaths.current);
     getDb()
       .prepare("UPDATE projects SET status = ?, manifest_hash = ? WHERE id = ?")
@@ -823,7 +848,9 @@ export async function createProjectFromUpload(
     await fs.rm(unpackDir, { recursive: true, force: true });
     return getWorkspaceSnapshot(projectId, { ensurePreview: false });
   } catch (error) {
-    getDb().prepare("UPDATE projects SET status = ? WHERE id = ?").run("error", projectId);
+    await stopPreviewRunner(projectId).catch(() => undefined);
+    getDb().prepare("DELETE FROM projects WHERE id = ?").run(projectId);
+    await fs.rm(projectPaths.root, { recursive: true, force: true });
     throw error;
   }
 }
@@ -855,7 +882,11 @@ export async function saveProjectFile(
 
   const nextManifestHash = await readManifestHash(project.extractedPath);
   if (nextManifestHash !== project.manifestHash) {
-    await installDependencies(project.extractedPath, project.packageManager);
+    await installDependenciesWithRecovery(
+      projectId,
+      project.extractedPath,
+      project.packageManager,
+    );
   }
 
   await createRevision({
@@ -983,7 +1014,11 @@ export async function applyAiEdit(
 
   const nextManifestHash = await readManifestHash(project.extractedPath);
   if (nextManifestHash !== project.manifestHash) {
-    await installDependencies(project.extractedPath, project.packageManager);
+    await installDependenciesWithRecovery(
+      payload.projectId,
+      project.extractedPath,
+      project.packageManager,
+    );
   }
 
   await createRevision({
@@ -1027,7 +1062,7 @@ async function switchToRevision(
 
     const restoredManifestHash = await readManifestHash(project.extractedPath);
     if (restoredManifestHash !== project.manifestHash) {
-      await installDependencies(project.extractedPath, project.packageManager);
+      await installDependenciesWithRecovery(projectId, project.extractedPath, project.packageManager);
     }
 
     await restartPreviewRunner(projectId);
@@ -1046,7 +1081,7 @@ async function switchToRevision(
 
       const rollbackManifestHash = await readManifestHash(project.extractedPath);
       if (rollbackManifestHash !== project.manifestHash) {
-        await installDependencies(project.extractedPath, project.packageManager);
+        await installDependenciesWithRecovery(projectId, project.extractedPath, project.packageManager);
       }
 
       getDb()
