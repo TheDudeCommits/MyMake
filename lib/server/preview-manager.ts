@@ -148,6 +148,7 @@ async function getRunnerSpec(
   command: string;
   args: string[];
   env: NodeJS.ProcessEnv;
+  readyStrategy: "http" | "stdout-or-http";
 }> {
   const runtime = await detectProjectRuntime(projectDir);
   if (runtime === "next") {
@@ -158,6 +159,7 @@ async function getRunnerSpec(
         ...process.env,
         NODE_ENV: "development",
       },
+      readyStrategy: "stdout-or-http",
     };
   }
 
@@ -169,6 +171,7 @@ async function getRunnerSpec(
         ...process.env,
         NODE_ENV: "development",
       },
+      readyStrategy: "stdout-or-http",
     };
   }
 
@@ -307,6 +310,12 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
     runtime.runners.set(projectId, runner);
     touchRunner(runner);
     let stdoutBuffer = "";
+    let resolveReadySignal: (() => void) | null = null;
+    let rejectReadySignal: ((error: Error) => void) | null = null;
+    const readySignal = new Promise<void>((resolve, reject) => {
+      resolveReadySignal = resolve;
+      rejectReadySignal = reject;
+    });
 
     child.stdout?.on("data", (chunk) => {
       const text = String(chunk);
@@ -319,6 +328,9 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
         /ready in\s+\d+/i.test(stdoutBuffer)
       ) {
         markRunnerReady(runner);
+        resolveReadySignal?.();
+        resolveReadySignal = null;
+        rejectReadySignal = null;
       }
     });
     child.stderr?.on("data", (chunk) => {
@@ -329,10 +341,20 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
       if (runtime.activeProjectId === projectId) {
         runtime.activeProjectId = null;
       }
+
+      if (runner.status !== "ready") {
+        rejectReadySignal?.(new Error("Preview runner exited before it became ready."));
+        rejectReadySignal = null;
+        resolveReadySignal = null;
+      }
     });
 
     try {
-      await waitForRunner(targetUrl);
+      if (runnerSpec.readyStrategy === "stdout-or-http") {
+        await Promise.race([readySignal, waitForRunner(targetUrl)]);
+      } else {
+        await waitForRunner(targetUrl);
+      }
       markRunnerReady(runner);
       return runner;
     } catch (error) {

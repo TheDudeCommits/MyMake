@@ -216,7 +216,11 @@ function buildPreviewLoadingHtml(projectId: string, state: "starting" | "error")
           <div class="loader"><span class="dot"></span> Project: ${projectId}</div>
         </div>
         <script>
-          window.setTimeout(() => window.location.reload(), 900);
+          window.setTimeout(() => {
+            const url = new URL(window.location.href);
+            url.searchParams.set("__mymake_reload", String(Date.now()));
+            window.location.replace(url.toString());
+          }, 900);
         </script>
       </body>
     </html>`;
@@ -249,6 +253,36 @@ async function previewAuthGuard(req: Request, res: Response, nextFn: NextFunctio
   }
 
   nextFn();
+}
+
+async function ensurePreviewDocumentRunner(
+  projectId: string,
+  timeoutMs = 8_000,
+): Promise<boolean> {
+  let timeout: NodeJS.Timeout | null = null;
+
+  try {
+    await Promise.race([
+      ensurePreviewRunner(projectId),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("Preview document startup timed out.")),
+          timeoutMs,
+        );
+      }),
+    ]);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message === "Preview document startup timed out.") {
+      return false;
+    }
+
+    throw error;
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 const previewDocumentProxy = createProxyMiddleware<Request, Response>({
@@ -364,14 +398,39 @@ async function dispatchPreviewProxy(req: Request, res: Response, nextFn: NextFun
     return;
   }
 
+  res.setHeader("Cache-Control", "no-store, no-cache, max-age=0, must-revalidate");
+
   if (isHtmlRequest(req)) {
-    const runner = getPreviewRunnerInfo(projectId);
+    let runner = getPreviewRunnerInfo(projectId);
+
     if (!runner || runner.status !== "ready") {
-      warmPreviewRunner(projectId);
-      res
-        .status(runner?.status === "error" ? 503 : 202)
-        .send(buildPreviewLoadingHtml(projectId, runner?.status === "error" ? "error" : "starting"));
-      return;
+      try {
+        const isReady = await ensurePreviewDocumentRunner(projectId);
+        runner = getPreviewRunnerInfo(projectId);
+        if (!isReady || !runner || runner.status !== "ready") {
+          warmPreviewRunner(projectId);
+          res
+            .status(runner?.status === "error" ? 503 : 202)
+            .send(
+              buildPreviewLoadingHtml(
+                projectId,
+                runner?.status === "error" ? "error" : "starting",
+              ),
+            );
+          return;
+        }
+      } catch (error) {
+        warmPreviewRunner(projectId);
+        res
+          .status(503)
+          .send(buildPreviewLoadingHtml(projectId, "error"));
+        process.stderr.write(
+          `[preview:${projectId}] document proxy startup failed: ${
+            error instanceof Error ? error.stack || error.message : String(error)
+          }\n`,
+        );
+        return;
+      }
     }
 
     await previewDocumentProxy(req, res, nextFn);
