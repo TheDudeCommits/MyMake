@@ -66,6 +66,7 @@ export async function requestAiEdit(params: {
   aiModelKey?: AiModelKey | null;
   prompt: string;
   selection: SelectionPayload | null;
+  currentFilePath?: string | null;
   contextFiles: ContextFile[];
   attachments: AnthropicAttachment[];
 }): Promise<{
@@ -80,6 +81,7 @@ export async function requestAiEdit(params: {
       model: model.apiModel,
       prompt: params.prompt,
       selection: params.selection,
+      currentFilePath: params.currentFilePath || undefined,
       contextFiles: params.contextFiles,
       attachments: params.attachments,
     });
@@ -89,6 +91,7 @@ export async function requestAiEdit(params: {
     model: model.apiModel,
     prompt: params.prompt,
     selection: params.selection,
+    currentFilePath: params.currentFilePath || undefined,
     contextFiles: params.contextFiles,
     attachments: params.attachments,
   });

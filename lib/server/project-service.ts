@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import vm from "node:vm";
 
 import { nanoid } from "nanoid";
 
@@ -36,6 +37,20 @@ import {
   runtimeRequiresDependencyInstall,
   validateProjectDirectory,
 } from "@/lib/server/project-validation";
+import {
+  appendElementOverride,
+  ensureStaticEditableOverridesSupport,
+  getPreferredStaticEditableFile,
+  hasStaticEditableOverrides,
+  isEditableOverridesFile,
+  normalizeOverrideConfigContent,
+  OVERRIDES_CONFIG_PATH,
+  OVERRIDES_CSS_PATH,
+  OVERRIDES_ENGINE_PATH,
+  OVERRIDES_README_PATH,
+  OVERRIDES_SECTION_HOOKS_PATH,
+  OVERRIDES_SECTION_NAMES_PATH,
+} from "@/lib/server/static-overrides";
 import {
   archiveDirectoryToFile,
   createRevisionSnapshot,
@@ -293,6 +308,22 @@ async function installDependenciesWithRecovery(
 }
 
 function defaultFileCandidates(files: string[]): string[] {
+  const preferredStaticFile = getPreferredStaticEditableFile(files);
+  if (preferredStaticFile) {
+    return [
+      preferredStaticFile,
+      ...files.filter((file) =>
+        [
+          OVERRIDES_CSS_PATH,
+          OVERRIDES_README_PATH,
+          OVERRIDES_SECTION_HOOKS_PATH,
+          OVERRIDES_SECTION_NAMES_PATH,
+          "index.html",
+        ].includes(file),
+      ),
+    ];
+  }
+
   const priorities = [
     "app/page.tsx",
     "app/page.jsx",
@@ -317,6 +348,26 @@ function defaultFileCandidates(files: string[]): string[] {
   }
 
   return files.filter((file) => file.endsWith(".tsx") || file.endsWith(".ts") || file.endsWith(".css"));
+}
+
+function resolvePreferredAiFilePath(
+  files: string[],
+  requestedPath: string | null | undefined,
+): string | null {
+  if (requestedPath && files.includes(requestedPath) && isEditableOverridesFile(requestedPath)) {
+    return requestedPath;
+  }
+
+  const preferredStaticFile = getPreferredStaticEditableFile(files);
+  if (preferredStaticFile) {
+    return preferredStaticFile;
+  }
+
+  if (requestedPath && files.includes(requestedPath)) {
+    return requestedPath;
+  }
+
+  return defaultFileCandidates(files).find(Boolean) || null;
 }
 
 async function readFileIfText(projectDir: string, relativePath: string): Promise<string | null> {
@@ -392,6 +443,20 @@ function buildLargeFileExcerpt(params: {
 
   if (selection?.outerHtml) {
     const exactIndex = content.indexOf(selection.outerHtml);
+    if (exactIndex >= 0) {
+      anchors.add(exactIndex);
+    }
+  }
+
+  const framerAnchors = [
+    selection?.nearestFramerName || "",
+    ...(selection?.framerPath || []),
+  ]
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  for (const framerName of framerAnchors) {
+    const exactIndex = content.indexOf(`data-framer-name="${framerName}"`);
     if (exactIndex >= 0) {
       anchors.add(exactIndex);
     }
@@ -522,6 +587,177 @@ async function validateChangedFileImports(
   }
 }
 
+function validateEditableOverrideSyntax(
+  changedFiles: Array<{ path: string; content: string }>,
+): void {
+  for (const file of changedFiles) {
+    if (!isEditableOverridesFile(file.path) || !/\.(?:js|mjs|cjs)$/i.test(file.path)) {
+      continue;
+    }
+
+    try {
+      new vm.Script(file.content, { filename: file.path });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Invalid JavaScript.";
+      throw new Error(`AI edit produced invalid code in ${file.path}. ${message}`);
+    }
+  }
+}
+
+function normalizePrompt(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function buildExactSelectedOverrideTarget(selection: SelectionPayload): Record<string, unknown> | null {
+  if (selection.scopeSelector && selection.scopedSelector) {
+    return {
+      scopeSelector: selection.scopeSelector,
+      selector: selection.scopedSelector,
+    };
+  }
+
+  if (selection.selector) {
+    return {
+      selector: selection.selector,
+    };
+  }
+
+  if (selection.scopeSelector) {
+    return {
+      scopeSelector: selection.scopeSelector,
+    };
+  }
+
+  return null;
+}
+
+function buildSelectedContainerOverrideTarget(
+  selection: SelectionPayload,
+): Record<string, unknown> | null {
+  if (selection.scopeSelector) {
+    return {
+      scopeSelector: selection.scopeSelector,
+      selector: "",
+    };
+  }
+
+  return buildExactSelectedOverrideTarget(selection);
+}
+
+function promptRequestsHideSelection(prompt: string): boolean {
+  const normalized = normalizePrompt(prompt).toLowerCase();
+  return /(?:remove|hide|delete)\s+(?:this|it|selected|selected element|selected layer)/i.test(
+    normalized,
+  );
+}
+
+function extractDirectReplacementText(
+  prompt: string,
+  selection: SelectionPayload | null,
+): string | null {
+  const normalizedPrompt = normalizePrompt(prompt);
+  const patterns = [
+    /^(?:change|replace|rename)\s+this(?:\s+fully)?\s+(?:to|with)\s+["“]?(.+?)["”]?\s*$/i,
+    /^(?:change|replace|rename)\s+it\s+(?:to|with)\s+["“]?(.+?)["”]?\s*$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalizedPrompt.match(pattern);
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+
+  if (!selection?.textContent) {
+    return null;
+  }
+
+  const sourceText = normalizePrompt(selection.textContent).toLowerCase();
+  if (!sourceText || !normalizedPrompt.toLowerCase().includes(sourceText)) {
+    return null;
+  }
+
+  const replacementMatch = normalizedPrompt.match(/\b(?:to|with)\b\s+["“]?(.+?)["”]?\s*$/i);
+  return replacementMatch?.[1]?.trim() || null;
+}
+
+async function tryApplyStaticSelectionFallback(params: {
+  projectDir: string;
+  prompt: string;
+  selection: SelectionPayload | null;
+}): Promise<
+  | {
+      summary: string;
+      warnings: string[];
+      changedFiles: Array<{ path: string; content: string; reason?: string }>;
+    }
+  | null
+> {
+  if (!params.selection) {
+    return null;
+  }
+
+  if (promptRequestsHideSelection(params.prompt)) {
+    const target = buildSelectedContainerOverrideTarget(params.selection);
+    if (!target) {
+      return null;
+    }
+
+    const nextConfig = await appendElementOverride(params.projectDir, {
+      ...target,
+      hide: true,
+    });
+
+    return {
+      summary: "Removed the selected layer with a direct override.",
+      warnings: [],
+      changedFiles: [
+        {
+          path: OVERRIDES_CONFIG_PATH,
+          content: nextConfig,
+          reason: "Hide the selected Framer element with a targeted override.",
+        },
+      ],
+    };
+  }
+
+  const replacementText = extractDirectReplacementText(params.prompt, params.selection);
+  if (!replacementText) {
+    return null;
+  }
+
+  const target = buildExactSelectedOverrideTarget(params.selection);
+  if (!target) {
+    return null;
+  }
+
+  const nextConfig = await appendElementOverride(params.projectDir, {
+    ...target,
+    ...(params.selection.textContent
+      ? {
+          find: params.selection.textContent,
+          replace: replacementText,
+        }
+      : {
+          text: replacementText,
+        }),
+  });
+
+  return {
+    summary: params.selection.textContent
+      ? `Updated the selected text from "${params.selection.textContent}" to "${replacementText}" using a scoped element override.`
+      : `Updated the selected text to "${replacementText}".`,
+    warnings: [],
+    changedFiles: [
+      {
+        path: OVERRIDES_CONFIG_PATH,
+        content: nextConfig,
+        reason: "Update the selected Framer text layer with a direct override.",
+      },
+    ],
+  };
+}
+
 async function validateProjectImports(projectDir: string): Promise<void> {
   const projectFiles = await listProjectFiles(projectDir);
 
@@ -606,6 +842,7 @@ async function collectContextFiles(
   const allFiles = (await listProjectFiles(projectDir)).filter((file) =>
     isTextLikeFile(path.join(projectDir, file)),
   );
+  const hasEditableSupport = hasStaticEditableOverrides(allFiles);
   const routeCandidates = new Set(getRouteCandidates(route));
   const promptTerms = prompt
     .toLowerCase()
@@ -621,6 +858,24 @@ async function collectContextFiles(
 
       if (currentFilePath && file === currentFilePath) {
         score += 90;
+      }
+
+      if (hasEditableSupport) {
+        if (file === OVERRIDES_CONFIG_PATH) {
+          score += 140;
+        } else if (file === OVERRIDES_CSS_PATH) {
+          score += 125;
+        } else if (file === OVERRIDES_ENGINE_PATH) {
+          score += 120;
+        } else if (
+          file === OVERRIDES_README_PATH ||
+          file === OVERRIDES_SECTION_HOOKS_PATH ||
+          file === OVERRIDES_SECTION_NAMES_PATH
+        ) {
+          score += 110;
+        } else if (file.endsWith(".html")) {
+          score += 40;
+        }
       }
 
       if (file.startsWith("components/") || file.includes("/components/")) {
@@ -857,6 +1112,10 @@ export async function getWorkspaceSnapshot(
   } = {},
 ): Promise<ProjectWorkspace> {
   let project = getProjectRow(projectId);
+  const runtime = await detectProjectRuntime(project.extractedPath);
+  if (runtime === "static") {
+    await ensureStaticEditableOverridesSupport(project.extractedPath);
+  }
   let livePreview = getPreviewRunnerInfo(projectId);
   let previewStatus: ProjectWorkspace["preview"]["status"] =
     project.status === "error"
@@ -1049,8 +1308,10 @@ export async function saveProjectFile(
   await pruneRedoBranch(projectId);
 
   const absolutePath = resolveInsideRoot(project.extractedPath, relativePath);
+  const normalizedContent =
+    relativePath === OVERRIDES_CONFIG_PATH ? normalizeOverrideConfigContent(content) : content;
   await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-  await fs.writeFile(absolutePath, content, "utf8");
+  await fs.writeFile(absolutePath, normalizedContent, "utf8");
 
   const nextManifestHash = await readManifestHash(project.extractedPath);
   if (nextManifestHash !== project.manifestHash) {
@@ -1125,6 +1386,11 @@ export async function applyAiEdit(
   workspace: ProjectWorkspace;
 }> {
   const project = getProjectRow(payload.projectId);
+  const runtime = await detectProjectRuntime(project.extractedPath);
+  if (runtime === "static") {
+    await ensureStaticEditableOverridesSupport(project.extractedPath);
+  }
+
   const currentRevision = project.currentRevisionId
     ? getRevisionById(project.currentRevisionId)
     : null;
@@ -1158,22 +1424,27 @@ export async function applyAiEdit(
     }),
   );
 
+  const projectFiles = await listProjectFiles(project.extractedPath);
+  const effectiveCurrentFilePath = resolvePreferredAiFilePath(
+    projectFiles,
+    payload.currentFilePath,
+  );
   const route = payload.selection?.route || "/";
   const activeFileContent =
-    payload.currentFilePath &&
-    isTextLikeFile(path.join(project.extractedPath, payload.currentFilePath))
-      ? await fs.readFile(path.join(project.extractedPath, payload.currentFilePath), "utf8")
+    effectiveCurrentFilePath &&
+    isTextLikeFile(path.join(project.extractedPath, effectiveCurrentFilePath))
+      ? await fs.readFile(path.join(project.extractedPath, effectiveCurrentFilePath), "utf8")
       : null;
   const contextFiles = await collectContextFiles(
     project.extractedPath,
     route,
-    payload.currentFilePath,
+    effectiveCurrentFilePath,
     payload.prompt,
     payload.selection,
   );
 
   const shouldUsePatchMode = Boolean(
-    payload.currentFilePath &&
+    effectiveCurrentFilePath &&
       activeFileContent &&
       activeFileContent.length > LARGE_FILE_EDIT_THRESHOLD,
   );
@@ -1191,29 +1462,74 @@ export async function applyAiEdit(
       };
 
   let changedFiles: Array<{ path: string; content: string; reason?: string }>;
+  const canUseStaticSelectionFallback =
+    runtime === "static" && hasStaticEditableOverrides(projectFiles);
 
-  if (shouldUsePatchMode) {
-    aiResult = await requestAiPatchEdit({
-      aiModelKey: payload.aiModelKey,
-      prompt: payload.prompt,
-      selection: payload.selection,
-      currentFilePath: payload.currentFilePath!,
-      contextFiles,
-      attachments,
-    });
-    changedFiles = await applyPatchOperations(project.extractedPath, aiResult.operations);
+  const fallback = canUseStaticSelectionFallback
+    ? await tryApplyStaticSelectionFallback({
+        projectDir: project.extractedPath,
+        prompt: payload.prompt,
+        selection: payload.selection,
+      })
+    : null;
+
+  if (fallback) {
+    aiResult = fallback;
+    changedFiles = fallback.changedFiles;
   } else {
-    aiResult = await requestAiEdit({
-      aiModelKey: payload.aiModelKey,
-      prompt: payload.prompt,
-      selection: payload.selection,
-      contextFiles,
-      attachments,
-    });
-    changedFiles = aiResult.changedFiles;
+    try {
+      if (shouldUsePatchMode) {
+        aiResult = await requestAiPatchEdit({
+          aiModelKey: payload.aiModelKey,
+          prompt: payload.prompt,
+          selection: payload.selection,
+          currentFilePath: effectiveCurrentFilePath!,
+          contextFiles,
+          attachments,
+        });
+        changedFiles = await applyPatchOperations(project.extractedPath, aiResult.operations);
+      } else {
+        aiResult = await requestAiEdit({
+          aiModelKey: payload.aiModelKey,
+          prompt: payload.prompt,
+          selection: payload.selection,
+          currentFilePath: effectiveCurrentFilePath,
+          contextFiles,
+          attachments,
+        });
+        changedFiles = aiResult.changedFiles;
+      }
+    } catch (error) {
+      if (!canUseStaticSelectionFallback) {
+        throw error;
+      }
+
+      const recoveryFallback = await tryApplyStaticSelectionFallback({
+        projectDir: project.extractedPath,
+        prompt: payload.prompt,
+        selection: payload.selection,
+      });
+
+      if (!recoveryFallback) {
+        throw error;
+      }
+
+      aiResult = recoveryFallback;
+      changedFiles = recoveryFallback.changedFiles;
+    }
   }
 
+  changedFiles = changedFiles.map((file) =>
+    file.path === OVERRIDES_CONFIG_PATH
+      ? {
+          ...file,
+          content: normalizeOverrideConfigContent(file.content),
+        }
+      : file,
+  );
+
   await validateChangedFileImports(project.extractedPath, changedFiles);
+  validateEditableOverrideSyntax(changedFiles);
 
   const changedPaths: string[] = [];
   for (const change of changedFiles) {
@@ -1248,7 +1564,7 @@ export async function applyAiEdit(
       reason: item.reason,
     })),
     workspace: await getWorkspaceSnapshot(payload.projectId, {
-      currentFilePath: payload.currentFilePath || changedPaths[0] || null,
+      currentFilePath: effectiveCurrentFilePath || changedPaths[0] || null,
       ensurePreview: false,
     }),
   };
@@ -1269,6 +1585,9 @@ async function switchToRevision(
 
   try {
     await syncSnapshotToCurrent(targetRevision.snapshotPath, project.extractedPath);
+    if ((await detectProjectRuntime(project.extractedPath)) === "static") {
+      await ensureStaticEditableOverridesSupport(project.extractedPath);
+    }
     await validateProjectImports(project.extractedPath);
 
     const restoredManifestHash = await readManifestHash(project.extractedPath);

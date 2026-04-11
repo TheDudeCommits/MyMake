@@ -10,13 +10,13 @@ import type {
 import type { ContextFile } from "@/lib/server/anthropic";
 
 const changedFileSchema = z.object({
-  path: z.string().min(1),
+  path: z.string().default(""),
   content: z.string(),
   reason: z.string().nullable(),
 });
 
 const patchOperationSchema = z.object({
-  path: z.string().min(1),
+  path: z.string().default(""),
   search: z.string().min(1),
   replace: z.string(),
   reason: z.string().nullable(),
@@ -59,7 +59,6 @@ const aiJsonSchema = {
         properties: {
           path: {
             type: "string",
-            minLength: 1,
           },
           content: {
             type: "string",
@@ -98,7 +97,6 @@ const aiPatchJsonSchema = {
         properties: {
           path: {
             type: "string",
-            minLength: 1,
           },
           search: {
             type: "string",
@@ -123,6 +121,65 @@ function getOpenAiClient(): OpenAI {
   }
 
   return new OpenAI({ apiKey: openaiApiKey });
+}
+
+function isStaticOverrideContext(params: {
+  currentFilePath?: string;
+  contextFiles: ContextFile[];
+}): boolean {
+  return (
+    params.currentFilePath === "editable/overrides.config.js" ||
+    params.contextFiles.some((file) => file.path === "editable/overrides.config.js")
+  );
+}
+
+function staticOverrideInstructions(): string[] {
+  return [
+    "This project is a static Framer export with an editable override layer.",
+    "Prefer editing editable/overrides.config.js or editable/overrides.css instead of rewriting raw HTML.",
+    "Use window.__PLATFORM_OVERRIDES__.elements for exact selected-element changes.",
+    "Each elements entry can use selector, scopeSelector, scopedSelector, nearestFramerName, hide/remove, styles, cssVars, text, find/replace, src, alt, href, rel, target, attributes, and customCss.",
+    "Use sections[SECTION_NAME] only when the change should affect a broader Framer block.",
+    "When a selection includes nearestFramerName or scopedSelector, preserve those hooks and target the selected element precisely.",
+    "Never duplicate top-level keys in editable/overrides.config.js. Update the existing elements, global, sections, rootCssVars, or customCss values instead.",
+  ];
+}
+
+function normalizeChangedFiles(
+  changedFiles: z.infer<typeof changedFileSchema>[],
+  currentFilePath?: string,
+): AiChangedFile[] {
+  return changedFiles.map((file) => {
+    const normalizedPath = file.path.trim() || currentFilePath || "";
+    if (!normalizedPath) {
+      throw new Error("OpenAI did not specify which file to update.");
+    }
+
+    return {
+      path: normalizedPath,
+      content: file.content,
+      ...(file.reason ? { reason: file.reason } : {}),
+    };
+  });
+}
+
+function normalizePatchOperations(
+  operations: z.infer<typeof patchOperationSchema>[],
+  currentFilePath?: string,
+): Array<{ path: string; search: string; replace: string; reason?: string }> {
+  return operations.map((operation) => {
+    const normalizedPath = operation.path.trim() || currentFilePath || "";
+    if (!normalizedPath) {
+      throw new Error("OpenAI did not specify which file to patch.");
+    }
+
+    return {
+      path: normalizedPath,
+      search: operation.search,
+      replace: operation.replace,
+      ...(operation.reason ? { reason: operation.reason } : {}),
+    };
+  });
 }
 
 function buildCommonContent(params: {
@@ -182,6 +239,7 @@ export async function requestOpenAiEdit(params: {
   model: string;
   prompt: string;
   selection: SelectionPayload | null;
+  currentFilePath?: string;
   contextFiles: ContextFile[];
   attachments: AnthropicAttachment[];
 }): Promise<{
@@ -200,6 +258,7 @@ export async function requestOpenAiEdit(params: {
     "Do not rename files, change relative import paths, or change export/import symbol names unless the user explicitly asks for that refactor.",
     "Preserve existing file paths and module wiring by default.",
     "Keep Tailwind and existing styling conventions intact unless the prompt explicitly asks for a larger redesign.",
+    ...(isStaticOverrideContext(params) ? staticOverrideInstructions() : []),
   ].join("\n");
 
   const response = await client.chat.completions.create({
@@ -233,11 +292,7 @@ export async function requestOpenAiEdit(params: {
 
   return {
     ...parsed,
-    changedFiles: parsed.changedFiles.map((file) => ({
-      path: file.path,
-      content: file.content,
-      ...(file.reason ? { reason: file.reason } : {}),
-    })),
+    changedFiles: normalizeChangedFiles(parsed.changedFiles, params.currentFilePath),
   };
 }
 
@@ -306,11 +361,6 @@ export async function requestOpenAiPatchEdit(params: {
 
   return {
     ...parsed,
-    operations: parsed.operations.map((operation) => ({
-      path: operation.path,
-      search: operation.search,
-      replace: operation.replace,
-      ...(operation.reason ? { reason: operation.reason } : {}),
-    })),
+    operations: normalizePatchOperations(parsed.operations, params.currentFilePath),
   };
 }

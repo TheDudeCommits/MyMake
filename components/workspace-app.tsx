@@ -168,6 +168,29 @@ function checkpointLabel(revision: RevisionRecord): string {
   return `#${String(revision.sequence + 1).padStart(2, "0")}`;
 }
 
+function selectedElementTitle(selection: SelectionPayload | null): string {
+  if (!selection) {
+    return "No layer selected yet";
+  }
+
+  const label = selection.nearestFramerName || selection.tagName.toLowerCase();
+  return `${label} on ${selection.route}`;
+}
+
+function selectedElementSummary(selection: SelectionPayload | null): string {
+  if (!selection) {
+    return "Turn on the picker, hover the preview, and click the exact layer you want to edit.";
+  }
+
+  return (
+    selection.textContent ||
+    selection.nearestFramerName ||
+    selection.scopedSelector ||
+    selection.selector ||
+    selection.domPath
+  );
+}
+
 function compactRevisionMessage(value: string): string {
   let normalized = value.replace(/\s+/g, " ").trim();
   const softCutMarkers = [
@@ -968,7 +991,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
         setIsPicking(false);
         setFeedback(
           payload
-            ? `Selected ${payload.tagName.toLowerCase()} on ${payload.route}.`
+            ? `Selected ${payload.nearestFramerName || payload.tagName.toLowerCase()} on ${payload.route}.`
             : "Selected element is ready for the next AI edit.",
         );
         return;
@@ -1608,14 +1631,10 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                     ) : null}
                   </div>
                   <p className="mt-2 text-sm font-medium text-slate-100">
-                    {selectedElement
-                      ? `${selectedElement.tagName.toLowerCase()} on ${selectedElement.route}`
-                      : "No layer selected yet"}
+                    {selectedElementTitle(selectedElement)}
                   </p>
                   <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
-                    {selectedElement?.textContent ||
-                      selectedElement?.domPath ||
-                      "Turn on the picker, hover the preview, and click the exact layer you want to edit."}
+                    {selectedElementSummary(selectedElement)}
                   </p>
                 </div>
 

@@ -41,6 +41,14 @@ export function buildPreviewBridgeScript(projectId: string): string {
         return output;
       }
 
+      function cssEscape(value) {
+        if (window.CSS && typeof window.CSS.escape === "function") {
+          return window.CSS.escape(value);
+        }
+
+        return String(value).replace(/"/g, '\\"');
+      }
+
       function buildDomPath(element) {
         const segments = [];
         let current = element;
@@ -71,6 +79,92 @@ export function buildPreviewBridgeScript(projectId: string): string {
         }
 
         return segments.join(" > ");
+      }
+
+      function buildSelectorSegment(element) {
+        if (!(element instanceof Element)) {
+          return "";
+        }
+
+        if (element.id) {
+          return "#" + cssEscape(element.id);
+        }
+
+        if (element.hasAttribute("data-framer-appear-id")) {
+          return '[data-framer-appear-id="' + cssEscape(element.getAttribute("data-framer-appear-id")) + '"]';
+        }
+
+        if (element.hasAttribute("data-framer-name")) {
+          return '[data-framer-name="' + cssEscape(element.getAttribute("data-framer-name")) + '"]';
+        }
+
+        let segment = element.tagName.toLowerCase();
+        const preferredClasses = Array.from(element.classList)
+          .filter((className) => className && !/^hidden-/.test(className))
+          .slice(0, 2);
+
+        if (preferredClasses.length) {
+          segment += "." + preferredClasses.map(cssEscape).join(".");
+        }
+
+        const parent = element.parentElement;
+        if (parent) {
+          const siblings = Array.from(parent.children).filter(
+            (child) => child.tagName === element.tagName,
+          );
+          if (siblings.length > 1) {
+            segment += ":nth-of-type(" + (siblings.indexOf(element) + 1) + ")";
+          }
+        }
+
+        return segment;
+      }
+
+      function buildSelector(element, stopAt) {
+        if (!(element instanceof Element)) {
+          return null;
+        }
+
+        const segments = [];
+        let current = element;
+        while (current && current !== document.body && current !== stopAt) {
+          const segment = buildSelectorSegment(current);
+          if (!segment) {
+            break;
+          }
+
+          segments.unshift(segment);
+          if (segment.startsWith("#")) {
+            break;
+          }
+          current = current.parentElement;
+        }
+
+        return segments.length ? segments.join(" > ") : null;
+      }
+
+      function getFramerAncestors(element) {
+        const names = [];
+        let current = element;
+        while (current && current instanceof Element && current !== document.body) {
+          const framerName = current.getAttribute("data-framer-name");
+          if (framerName) {
+            names.unshift(framerName);
+          }
+          current = current.parentElement;
+        }
+        return names;
+      }
+
+      function getNearestFramerRoot(element) {
+        let current = element;
+        while (current && current instanceof Element && current !== document.body) {
+          if (current.hasAttribute("data-framer-name")) {
+            return current;
+          }
+          current = current.parentElement;
+        }
+        return null;
       }
 
       function ensureOverlay() {
@@ -124,10 +218,25 @@ export function buildPreviewBridgeScript(projectId: string): string {
 
       function currentSelectionPayload(element) {
         const rect = element.getBoundingClientRect();
+        const framerRoot = getNearestFramerRoot(element);
+        const selector = buildSelector(element, null);
+        const scopeSelector =
+          framerRoot && framerRoot instanceof Element
+            ? buildSelector(framerRoot, null)
+            : null;
+        const scopedSelector =
+          framerRoot && framerRoot !== element
+            ? buildSelector(element, framerRoot)
+            : null;
         return {
           route: getPreviewRoute(),
           url: window.location.href,
           domPath: buildDomPath(element),
+          selector,
+          scopeSelector,
+          scopedSelector,
+          nearestFramerName: framerRoot ? framerRoot.getAttribute("data-framer-name") : null,
+          framerPath: getFramerAncestors(element),
           tagName: element.tagName.toLowerCase(),
           textContent: (element.textContent || "").trim().slice(0, 600),
           attributes: attributeMap(element),

@@ -53,6 +53,11 @@ export interface SelectionPayload {
   route: string;
   url: string;
   domPath: string;
+  selector: string | null;
+  scopeSelector: string | null;
+  scopedSelector: string | null;
+  nearestFramerName: string | null;
+  framerPath: string[];
   tagName: string;
   textContent: string;
   attributes: Record<string, string>;

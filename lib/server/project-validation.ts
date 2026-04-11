@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
 
+import { ensureStaticEditableOverridesSupport } from "@/lib/server/static-overrides";
 import type { PackageManager, ProjectRuntime } from "@/lib/types";
 
 interface ProjectManifest {
@@ -373,6 +374,12 @@ export function runtimeRequiresDependencyInstall(runtime: ProjectRuntime | null)
 export async function normalizeImportedProject(projectDir: string): Promise<void> {
   const packageJsonPath = path.join(projectDir, "package.json");
   const manifest = await readManifest(projectDir);
+  const runtime = await detectProjectRuntime(projectDir);
+
+  if (runtime === "static") {
+    await ensureStaticEditableOverridesSupport(projectDir);
+  }
+
   if (!manifest) {
     return;
   }
@@ -433,6 +440,10 @@ export async function normalizeImportedProject(projectDir: string): Promise<void
     if (routerCompatibleContent !== originalContent) {
       await fs.writeFile(absolutePath, routerCompatibleContent, "utf8");
     }
+  }
+
+  if (runtime === "static") {
+    await ensureStaticEditableOverridesSupport(projectDir);
   }
 }
 
