@@ -2,7 +2,7 @@ export type PackageManager = "npm" | "pnpm" | "yarn";
 export type ProjectStatus = "installing" | "ready" | "error" | "unsupported";
 export type RevisionSource = "upload" | "ai" | "manual" | "undo" | "redo";
 export type DevicePreset = "desktop" | "tablet" | "mobile";
-export type ProjectRuntime = "next" | "vite";
+export type ProjectRuntime = "next" | "vite" | "static";
 export type AiProvider = "openai" | "anthropic";
 export type AiModelKey = "openai-chatgpt-5-2" | "anthropic-sonnet-4-6";
 

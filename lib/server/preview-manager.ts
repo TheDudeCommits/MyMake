@@ -5,7 +5,11 @@ import { createServer } from "node:net";
 import path from "node:path";
 
 import { getDb } from "@/lib/server/db";
-import { detectProjectRuntime, normalizeImportedProject } from "@/lib/server/project-validation";
+import {
+  detectProjectRuntime,
+  normalizeImportedProject,
+  runtimeRequiresDependencyInstall,
+} from "@/lib/server/project-validation";
 import { getProjectPaths } from "@/lib/server/storage";
 import type { PackageManager } from "@/lib/types";
 
@@ -238,6 +242,11 @@ async function ensureProjectDependenciesInstalled(project: {
   package_manager: PackageManager;
   manifest_hash: string | null;
 }): Promise<void> {
+  const runtime = await detectProjectRuntime(project.extracted_path);
+  if (!runtimeRequiresDependencyInstall(runtime)) {
+    return;
+  }
+
   const nodeModulesPath = path.join(project.extracted_path, "node_modules");
   if (await pathExists(nodeModulesPath)) {
     return;
@@ -307,6 +316,17 @@ function nextViteRunnerCommandArgs(projectDir: string, projectId: string, port: 
   ];
 }
 
+function staticRunnerCommandArgs(projectDir: string, port: number): string[] {
+  return [
+    path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"),
+    path.join(process.cwd(), "scripts", "project-static-preview-runner.ts"),
+    "--projectDir",
+    projectDir,
+    "--port",
+    String(port),
+  ];
+}
+
 async function getRunnerSpec(
   projectId: string,
   projectDir: string,
@@ -335,6 +355,18 @@ async function getRunnerSpec(
     return {
       command: process.execPath,
       args: nextViteRunnerCommandArgs(projectDir, projectId, port),
+      env: {
+        ...process.env,
+        NODE_ENV: "development",
+      },
+      readyStrategy: "stdout-or-http",
+    };
+  }
+
+  if (runtime === "static") {
+    return {
+      command: process.execPath,
+      args: staticRunnerCommandArgs(projectDir, port),
       env: {
         ...process.env,
         NODE_ENV: "development",

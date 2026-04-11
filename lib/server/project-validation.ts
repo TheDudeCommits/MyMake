@@ -338,30 +338,36 @@ function applyPreviewRouterCompatibility(sourceText: string, filePath: string): 
 
 export async function detectProjectRuntime(projectDir: string): Promise<ProjectRuntime | null> {
   const manifest = await readManifest(projectDir);
-  if (!manifest) {
-    return null;
+  if (manifest) {
+    const dependencies = collectManifestDependencies(manifest);
+    const devScript = manifest.scripts?.dev || "";
+    const buildScript = manifest.scripts?.build || "";
+    const scriptText = `${devScript} ${buildScript}`.toLowerCase();
+
+    if (dependencies.next || scriptText.includes("next")) {
+      return "next";
+    }
+
+    if (
+      dependencies.vite ||
+      scriptText.includes("vite") ||
+      (await pathExists(path.join(projectDir, "vite.config.ts"))) ||
+      (await pathExists(path.join(projectDir, "vite.config.js"))) ||
+      (await pathExists(path.join(projectDir, "vite.config.mjs")))
+    ) {
+      return "vite";
+    }
   }
 
-  const dependencies = collectManifestDependencies(manifest);
-  const devScript = manifest.scripts?.dev || "";
-  const buildScript = manifest.scripts?.build || "";
-  const scriptText = `${devScript} ${buildScript}`.toLowerCase();
-
-  if (dependencies.next || scriptText.includes("next")) {
-    return "next";
-  }
-
-  if (
-    dependencies.vite ||
-    scriptText.includes("vite") ||
-    (await pathExists(path.join(projectDir, "vite.config.ts"))) ||
-    (await pathExists(path.join(projectDir, "vite.config.js"))) ||
-    (await pathExists(path.join(projectDir, "vite.config.mjs")))
-  ) {
-    return "vite";
+  if (await pathExists(path.join(projectDir, "index.html"))) {
+    return "static";
   }
 
   return null;
+}
+
+export function runtimeRequiresDependencyInstall(runtime: ProjectRuntime | null): boolean {
+  return runtime === "next" || runtime === "vite";
 }
 
 export async function normalizeImportedProject(projectDir: string): Promise<void> {
@@ -443,16 +449,30 @@ export async function detectPackageManager(projectDir: string): Promise<PackageM
 }
 
 export async function validateProjectDirectory(projectDir: string): Promise<ValidationResult> {
-  const manifest = await readManifest(projectDir);
-  if (!manifest) {
+  const packageManager = await detectPackageManager(projectDir);
+  const runtime = await detectProjectRuntime(projectDir);
+  if (!runtime) {
     return {
       ok: false,
-      packageManager: "npm",
+      packageManager,
+      reason:
+        "The uploaded project must be a supported frontend app built with Next.js, Vite, or a static Framer-style export.",
+    };
+  }
+
+  const manifest = await readManifest(projectDir);
+  if (!manifest && runtime !== "static") {
+    return {
+      ok: false,
+      packageManager,
       reason: "The uploaded zip does not contain a package.json file.",
     };
   }
 
-  const packageManager = await detectPackageManager(projectDir);
+  if (!manifest) {
+    return { ok: true, packageManager, runtime };
+  }
+
   if (manifest.workspaces) {
     return {
       ok: false,
@@ -462,25 +482,18 @@ export async function validateProjectDirectory(projectDir: string): Promise<Vali
   }
 
   const dependencies = collectManifestDependencies(manifest);
-  const runtime = await detectProjectRuntime(projectDir);
-  if (!runtime) {
-    return {
-      ok: false,
-      packageManager,
-      reason: "The uploaded project must be a supported React frontend app built with Next.js or Vite.",
-    };
-  }
-
-  const hasNext = Boolean(dependencies.next);
-  const hasVite = Boolean(dependencies.vite);
-  const hasReact = Boolean(dependencies.react);
-  const hasReactDom = Boolean(dependencies["react-dom"]);
-  if ((!hasNext && !hasVite) || !hasReact || !hasReactDom) {
-    return {
-      ok: false,
-      packageManager,
-      reason: "The uploaded project must include React and React DOM, and use Next.js or Vite.",
-    };
+  if (runtimeRequiresDependencyInstall(runtime)) {
+    const hasNext = Boolean(dependencies.next);
+    const hasVite = Boolean(dependencies.vite);
+    const hasReact = Boolean(dependencies.react);
+    const hasReactDom = Boolean(dependencies["react-dom"]);
+    if ((!hasNext && !hasVite) || !hasReact || !hasReactDom) {
+      return {
+        ok: false,
+        packageManager,
+        reason: "The uploaded project must include React and React DOM, and use Next.js or Vite.",
+      };
+    }
   }
 
   if (runtime === "next") {
@@ -524,6 +537,17 @@ export async function validateProjectDirectory(projectDir: string): Promise<Vali
         ok: false,
         packageManager,
         reason: "Vite uploads must include index.html and a src/main.* entry file.",
+      };
+    }
+  }
+
+  if (runtime === "static") {
+    const hasIndexHtml = await pathExists(path.join(projectDir, "index.html"));
+    if (!hasIndexHtml) {
+      return {
+        ok: false,
+        packageManager,
+        reason: "Static uploads must include an index.html file at the project root.",
       };
     }
   }

@@ -29,8 +29,10 @@ import {
   warmPreviewRunner,
 } from "@/lib/server/preview-manager";
 import {
+  detectProjectRuntime,
   detectPackageManager,
   normalizeImportedProject,
+  runtimeRequiresDependencyInstall,
   validateProjectDirectory,
 } from "@/lib/server/project-validation";
 import {
@@ -269,6 +271,11 @@ async function installDependenciesWithRecovery(
   projectDir: string,
   packageManager: PackageManager,
 ): Promise<void> {
+  const runtime = await detectProjectRuntime(projectDir);
+  if (!runtimeRequiresDependencyInstall(runtime)) {
+    return;
+  }
+
   try {
     await installDependencies(projectDir, packageManager);
   } catch (error) {
