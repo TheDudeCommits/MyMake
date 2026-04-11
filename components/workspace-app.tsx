@@ -3,23 +3,21 @@
 import MonacoEditor from "@monaco-editor/react";
 import {
   Code2,
-  Eye,
   FileCode2,
   FolderKanban,
-  ImagePlus,
   Laptop,
   Loader2,
   LogOut,
   MonitorSmartphone,
   MousePointerSquareDashed,
+  Paperclip,
   RefreshCcw,
   Save,
   SendHorizonal,
   Smartphone,
-  Sparkles,
   Tablet,
+  Trash2,
   Undo2,
-  Upload,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -30,6 +28,7 @@ import type {
   DashboardSnapshot,
   DevicePreset,
   FileNode,
+  ProjectRecord,
   ProjectWorkspace,
   RevisionRecord,
   SelectionPayload,
@@ -89,10 +88,6 @@ function languageForPath(filePath: string | null): string {
   return "typescript";
 }
 
-function formatTimestamp(value: string): string {
-  return `${value.replace("T", " ").slice(0, 16)} UTC`;
-}
-
 function flattenFileNodes(nodes: FileNode[]): FileNode[] {
   return nodes.flatMap((node) =>
     node.type === "directory" ? [node, ...flattenFileNodes(node.children || [])] : [node],
@@ -133,55 +128,77 @@ function shortAiModelLabel(model: AiModelOption): string {
 }
 
 function checkpointLabel(revision: RevisionRecord): string {
-  return `Checkpoint ${String(revision.sequence + 1).padStart(2, "0")}`;
+  return `#${String(revision.sequence + 1).padStart(2, "0")}`;
+}
+
+function compactRevisionMessage(value: string): string {
+  let normalized = value.replace(/\s+/g, " ").trim();
+  const softCutMarkers = [
+    ", including ",
+    ", removing ",
+    ", while ",
+    ", across ",
+    ", throughout ",
+  ];
+
+  for (const marker of softCutMarkers) {
+    const index = normalized.toLowerCase().indexOf(marker);
+    if (index > 80) {
+      normalized = `${normalized.slice(0, index).trimEnd()}.`;
+      break;
+    }
+  }
+
+  if (normalized.length > 150) {
+    const trimmed = normalized.slice(0, 147);
+    normalized = `${trimmed.slice(0, trimmed.lastIndexOf(" ")).trimEnd()}…`;
+  }
+
+  return normalized;
 }
 
 function revisionSummaryText(revision: RevisionRecord): string {
-  if (revision.summary) {
-    return revision.summary;
-  }
+  const fallback =
+    revision.source === "upload"
+      ? "Imported the project and created the first working checkpoint."
+      : revision.source === "manual"
+        ? "Saved a manual code edit and synced the preview."
+        : revision.source === "undo"
+          ? "Moved back to an earlier checkpoint."
+          : revision.source === "redo"
+            ? "Moved forward to a later checkpoint."
+            : "Applied a new AI-assisted design change.";
 
-  if (revision.source === "upload") {
-    return "Imported the project and created the first working checkpoint.";
-  }
-
-  if (revision.source === "manual") {
-    return "Saved a manual code edit and synced the preview.";
-  }
-
-  if (revision.source === "undo") {
-    return "Moved back to an earlier checkpoint.";
-  }
-
-  if (revision.source === "redo") {
-    return "Moved forward to a later checkpoint.";
-  }
-
-  return "Applied a new AI-assisted design change.";
-}
-
-function revisionSpeakerLabel(revision: RevisionRecord): string {
-  if (revision.source === "manual") {
-    return "You in code";
-  }
-
-  if (revision.source === "upload") {
-    return "MyMake";
-  }
-
-  return "MyMake AI";
+  return compactRevisionMessage(revision.summary || fallback);
 }
 
 function revisionPromptText(revision: RevisionRecord): string | null {
   if (revision.source === "ai") {
-    return revision.label;
+    return revision.label.trim();
   }
 
   if (revision.source === "manual") {
-    return `Saved ${revision.label.replace(/^Saved\s+/i, "")}`;
+    return `Saved ${revision.label.replace(/^Saved\s+/i, "")}`.trim();
   }
 
   return null;
+}
+
+function projectOptionLabel(project: ProjectRecord, duplicateNames: Map<string, number>): string {
+  const count = duplicateNames.get(project.name) || 0;
+  if (count <= 1) {
+    return project.name;
+  }
+
+  return `${project.name} · ${project.id.slice(-4)}`;
+}
+
+function iconTitle(label: string, disabled?: boolean): string | undefined {
+  if (disabled) {
+    return undefined;
+  }
+
+  return label;
 }
 
 function StatusPill({ status }: { status: ProjectWorkspace["project"]["status"] }) {
@@ -208,24 +225,26 @@ function ToolbarIconButton({
   active,
   children,
   disabled,
+  label,
   onClick,
 }: {
   active?: boolean;
   children: React.ReactNode;
   disabled?: boolean;
+  label: string;
   onClick?: () => void;
 }) {
   return (
     <button
       className={clsx(
-        "grid h-8 w-8 place-items-center rounded-[10px] border text-slate-200 transition",
-        active
-          ? "border-[#5f62ff]/40 bg-[#5f62ff]/14 text-white"
-          : "border-white/[0.08] bg-[#2a2b2f] hover:bg-[#303238]",
-        disabled && "cursor-not-allowed opacity-45 hover:bg-[#2a2b2f]",
+        "grid h-8 w-8 place-items-center text-slate-400 transition hover:text-white [&_svg]:stroke-[2.35]",
+        active && "text-[#d6d8ff]",
+        disabled && "cursor-not-allowed opacity-35 hover:text-slate-400",
       )}
       type="button"
       disabled={disabled}
+      title={iconTitle(label, disabled)}
+      aria-label={label}
       onClick={onClick}
     >
       {children}
@@ -236,21 +255,27 @@ function ToolbarIconButton({
 function RailIconButton({
   active,
   children,
+  label,
+  disabled,
   onClick,
 }: {
   active?: boolean;
   children: React.ReactNode;
+  label: string;
+  disabled?: boolean;
   onClick?: () => void;
 }) {
   return (
     <button
       className={clsx(
-        "grid h-8 w-8 place-items-center rounded-full border text-slate-300 transition",
-        active
-          ? "border-[#5f62ff]/40 bg-[#5f62ff]/14 text-white"
-          : "border-white/[0.08] bg-[#303033] hover:bg-[#3a3a3f]",
+        "grid h-8 w-8 place-items-center text-slate-400 transition hover:text-white [&_svg]:stroke-[2.35]",
+        active && "text-[#d6d8ff]",
+        disabled && "cursor-not-allowed opacity-35 hover:text-slate-400",
       )}
       type="button"
+      disabled={disabled}
+      title={iconTitle(label, disabled)}
+      aria-label={label}
       onClick={onClick}
     >
       {children}
@@ -397,6 +422,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   );
   const attachments = currentProject?.attachments ?? EMPTY_ATTACHMENTS;
   const currentDevice = DEVICE_PRESETS[devicePreset];
+  const isDesktopPreview = devicePreset === "desktop";
   const displayRoute = routeLabel(currentRoute);
   const hasUnsavedEdits = Boolean(editorFilePath && editorContent !== editorBaselineContent);
   const previewIdentity = currentProject
@@ -433,6 +459,13 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     [currentProject?.project.currentRevisionId, revisions],
   );
   const currentCheckpointLabel = currentRevision ? checkpointLabel(currentRevision) : "Version 1";
+  const projectNameCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    snapshot.projects.forEach((project) => {
+      counts.set(project.name, (counts.get(project.name) || 0) + 1);
+    });
+    return counts;
+  }, [snapshot.projects]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -642,6 +675,37 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       await refreshProject(projectId);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Could not open project.");
+    }
+  }
+
+  async function handleDeleteProject() {
+    if (!currentProject) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Remove "${currentProject.project.name}" from MyMake? This deletes its uploaded files, checkpoints, and attachments.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setError(null);
+      setFeedback(`Removing ${currentProject.project.name}...`);
+      const response = await fetch(`/api/projects/${currentProject.project.id}`, {
+        method: "DELETE",
+      });
+      const data = await readJsonResponse<SnapshotResponse>(response);
+      applySnapshot(data);
+      setPrompt("");
+      setIsPicking(false);
+      setIsCodePanelOpen(false);
+      setSelectedElement(null);
+      setSelectedAttachmentIds([]);
+      setFeedback(`Removed ${currentProject.project.name}.`);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Could not remove the project.");
     }
   }
 
@@ -891,7 +955,10 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       <div className="flex h-full flex-col">
         <header className="grid h-[60px] shrink-0 grid-cols-[336px_minmax(0,1fr)] border-b border-white/[0.08] bg-[#242528]">
           <div className="flex min-w-0 items-center gap-2 border-r border-white/[0.08] px-3">
-            <ToolbarIconButton onClick={() => projectUploadInputRef.current?.click()}>
+            <ToolbarIconButton
+              label={isUploading ? "Uploading project" : "Upload project zip"}
+              onClick={() => projectUploadInputRef.current?.click()}
+            >
               {isUploading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
@@ -910,7 +977,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                 </option>
                 {snapshot.projects.map((project) => (
                   <option key={project.id} value={project.id}>
-                    {project.name}
+                    {projectOptionLabel(project, projectNameCounts)}
                   </option>
                 ))}
               </select>
@@ -921,43 +988,46 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
               </div>
             </div>
 
-            <div className="grid h-8 w-8 place-items-center rounded-[10px] border border-white/[0.08] bg-[#2a2b2f] text-[11px] uppercase tracking-[0.16em] text-slate-300">
-              AI
-            </div>
+            {currentProject ? (
+              <ToolbarIconButton
+                label="Delete current project"
+                onClick={() => void handleDeleteProject()}
+              >
+                <Trash2 className="h-4 w-4" />
+              </ToolbarIconButton>
+            ) : null}
 
-            <button
-              className="inline-flex h-9 items-center gap-2 rounded-[12px] border border-white/[0.08] bg-[#2a2b2f] px-3 text-sm text-slate-300 transition hover:bg-[#303238]"
-              type="button"
-            >
-              {currentCheckpointLabel}
-              <div className="rotate-90 text-slate-500">
-                <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5">
-                  <path d="M6 3L11 8L6 13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </div>
-            </button>
+            <span className="text-sm font-medium text-slate-300">
+              {currentProject ? currentCheckpointLabel : "No checkpoint"}
+            </span>
           </div>
 
           <div className="flex min-w-0 items-center gap-2 px-4">
             <div className="flex items-center gap-1">
-              <ToolbarIconButton active={isPicking} onClick={() => setIsPicking((value) => !value)}>
-                <Eye className="h-4 w-4" />
-              </ToolbarIconButton>
-              <ToolbarIconButton disabled={!currentProject} onClick={() => void handleHistory("undo")}>
+              <ToolbarIconButton
+                label="Undo checkpoint"
+                disabled={!currentProject}
+                onClick={() => void handleHistory("undo")}
+              >
                 <Undo2 className="h-4 w-4" />
               </ToolbarIconButton>
-              <ToolbarIconButton disabled={!currentProject} onClick={() => void handleHistory("redo")}>
+              <ToolbarIconButton
+                label="Redo checkpoint"
+                disabled={!currentProject}
+                onClick={() => void handleHistory("redo")}
+              >
                 <RefreshCcw className="h-4 w-4" />
               </ToolbarIconButton>
             </div>
 
-            <div className="ml-2 flex h-9 min-w-0 max-w-[520px] flex-1 items-center gap-3 rounded-[20px] bg-[#303033] px-4 text-sm text-slate-200">
-              <RefreshCcw className="h-4 w-4 text-slate-400" />
+            <div className="ml-2 flex h-9 min-w-0 max-w-[520px] flex-1 items-center rounded-[20px] bg-[#303033] px-4 text-sm text-slate-200">
               <span className="truncate">/ {displayRoute}</span>
-              <currentDevice.icon className="ml-auto h-4 w-4 text-slate-300" />
             </div>
 
-            <ToolbarIconButton onClick={cycleDevicePreset}>
+            <ToolbarIconButton
+              label={`Switch device preview (${currentDevice.label})`}
+              onClick={cycleDevicePreset}
+            >
               <currentDevice.icon className="h-4 w-4" />
             </ToolbarIconButton>
 
@@ -965,10 +1035,14 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
               <div className="grid h-7 w-7 place-items-center rounded-full bg-[#6675a0] text-[12px] font-semibold text-white">
                 A
               </div>
-              <ToolbarIconButton active={isCodePanelOpen} onClick={() => setIsCodePanelOpen((value) => !value)}>
+              <ToolbarIconButton
+                label={isCodePanelOpen ? "Close code panel" : "Open code panel"}
+                active={isCodePanelOpen}
+                onClick={() => setIsCodePanelOpen((value) => !value)}
+              >
                 <Code2 className="h-4 w-4" />
               </ToolbarIconButton>
-              <ToolbarIconButton onClick={handleLogout}>
+              <ToolbarIconButton label="Sign out" onClick={handleLogout}>
                 <LogOut className="h-4 w-4" />
               </ToolbarIconButton>
               <button
@@ -992,10 +1066,13 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
         <div className="grid min-h-0 flex-1 grid-cols-[336px_minmax(0,1fr)]">
           <aside className="flex min-h-0 flex-col border-r border-white/[0.08] bg-[#2b2928]">
-            <div ref={leftRailScrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4">
+            <div
+              ref={leftRailScrollRef}
+              className="mymake-scrollbar-none min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4"
+            >
               <div className="space-y-4">
                 <div className="rounded-[16px] border border-white/[0.08] bg-[#2f2d2c] p-3.5">
-                  <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium text-[#8fd08f]">
                         {currentProject?.project.name || "No design project"}
@@ -1004,24 +1081,12 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                         {currentProject ? currentCheckpointLabel : "Upload a project to begin"}
                       </p>
                     </div>
-                    <button
-                      className="rounded-full px-2 py-1 text-sm text-slate-400 transition hover:bg-white/[0.06]"
-                      type="button"
-                      onClick={() => setIsCodePanelOpen((value) => !value)}
-                    >
-                      ...
-                    </button>
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     {currentProject ? <StatusPill status={currentProject.project.status} /> : null}
                     {currentProject ? (
                       <span className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
                         /{displayRoute}
-                      </span>
-                    ) : null}
-                    {currentProject ? (
-                      <span className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
-                        {formatTimestamp(currentProject.project.lastOpenedAt)}
                       </span>
                     ) : null}
                   </div>
@@ -1068,10 +1133,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
                 <div>
                   <div className="flex items-center justify-between gap-3 text-[11px] uppercase tracking-[0.24em] text-slate-500">
-                    <div className="flex items-center gap-2">
-                      <Sparkles className="h-3.5 w-3.5" />
-                      Conversation
-                    </div>
+                    <div>Conversation</div>
                     <span>{orderedRevisions.length} checkpoints</span>
                   </div>
 
@@ -1083,56 +1145,46 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                           currentProject.project.currentRevisionId === revision.id;
 
                         return (
-                          <article key={revision.id} className="space-y-2">
+                          <article key={revision.id} className="group space-y-2">
                             {promptText ? (
                               <div className="flex justify-end">
                                 <div className="max-w-[88%] rounded-[18px] border border-[#5f62ff]/28 bg-[#5f62ff]/12 px-3.5 py-3 text-left">
-                                  <p className="text-[10px] uppercase tracking-[0.2em] text-[#cfd2ff]">
-                                    You
-                                  </p>
-                                  <p className="mt-1 text-sm leading-6 text-white">{promptText}</p>
+                                  <p className="text-sm leading-6 text-white">{promptText}</p>
                                 </div>
                               </div>
                             ) : null}
 
                             <div className="rounded-[18px] border border-white/[0.08] bg-[#2f2d2c] px-3.5 py-3">
                               <div className="flex items-center justify-between gap-3">
-                                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
-                                  {revisionSpeakerLabel(revision)}
-                                </p>
                                 <span className="rounded-full border border-white/[0.08] bg-[#262628] px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-400">
                                   {checkpointLabel(revision)}
                                 </span>
+                                {isCurrentCheckpoint ? (
+                                  <span className="text-[10px] uppercase tracking-[0.16em] text-emerald-200">
+                                    Current
+                                  </span>
+                                ) : (
+                                  <button
+                                    className="opacity-0 transition group-hover:opacity-100 text-slate-400 hover:text-white"
+                                    type="button"
+                                    title={`Restore ${checkpointLabel(revision)}`}
+                                    aria-label={`Restore ${checkpointLabel(revision)}`}
+                                    onClick={() => void handleRestoreRevision(revision)}
+                                  >
+                                    <RefreshCcw className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
                               </div>
                               <p className="mt-2 text-sm leading-6 text-[#e7e7ea]">
                                 {revisionSummaryText(revision)}
                               </p>
-                              <div className="mt-3 flex items-center justify-between gap-3">
-                                <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
-                                  {formatTimestamp(revision.createdAt)}
-                                </p>
-                                <button
-                                  className={clsx(
-                                    "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium transition",
-                                    isCurrentCheckpoint
-                                      ? "cursor-default border-emerald-300/15 bg-emerald-300/10 text-emerald-100"
-                                      : "border-white/[0.08] bg-[#262628] text-slate-200 hover:bg-[#313136]",
-                                  )}
-                                  type="button"
-                                  disabled={isCurrentCheckpoint}
-                                  onClick={() => void handleRestoreRevision(revision)}
-                                >
-                                  <RefreshCcw className="h-3.5 w-3.5" />
-                                  {isCurrentCheckpoint ? "Current checkpoint" : "Restore checkpoint"}
-                                </button>
-                              </div>
                             </div>
                           </article>
                         );
                       })
                     ) : (
                       <div className="rounded-[16px] border border-dashed border-white/[0.08] bg-[#2f2d2c]/60 px-3.5 py-4 text-sm leading-6 text-slate-400">
-                        Upload a project, make edits, and every change will appear here as a numbered checkpoint with the prompt, AI response, and a restore button.
+                        Upload a project, make edits, and every change will appear here as a numbered checkpoint with the prompt, concise AI summary, and restore control.
                       </div>
                     )}
                   </div>
@@ -1142,7 +1194,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
             <div className="shrink-0 border-t border-white/[0.08] bg-[#262524] px-3 pb-3 pt-3">
               {attachments.length ? (
-                <div className="mb-2 flex max-h-[56px] flex-wrap gap-2 overflow-y-auto pr-1">
+                <div className="mymake-scrollbar-none mb-2 flex max-h-[56px] flex-wrap gap-2 overflow-y-auto pr-1">
                   {attachments.map((attachment) => (
                     <button
                       key={attachment.id}
@@ -1190,17 +1242,23 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
                 <div className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2">
                   <div className="flex items-center gap-1.5">
-                    <RailIconButton onClick={() => projectUploadInputRef.current?.click()}>
-                      <Upload className="h-3.5 w-3.5" />
-                    </RailIconButton>
-                    <RailIconButton onClick={() => attachmentInputRef.current?.click()}>
+                    <RailIconButton
+                      label={
+                        isUploadingAttachments ? "Uploading attachments" : "Attach files"
+                      }
+                      onClick={() => attachmentInputRef.current?.click()}
+                    >
                       {isUploadingAttachments ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
-                        <ImagePlus className="h-3.5 w-3.5" />
+                        <Paperclip className="h-3.5 w-3.5" />
                       )}
                     </RailIconButton>
-                    <RailIconButton active={isPicking} onClick={() => setIsPicking((value) => !value)}>
+                    <RailIconButton
+                      label={isPicking ? "Disable element picker" : "Enable element picker"}
+                      active={isPicking}
+                      onClick={() => setIsPicking((value) => !value)}
+                    >
                       <MousePointerSquareDashed className="h-3.5 w-3.5" />
                     </RailIconButton>
                   </div>
@@ -1230,9 +1288,11 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                       </div>
                     </div>
                     <button
-                      className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#6467ff] text-white transition hover:bg-[#7073ff] disabled:cursor-not-allowed disabled:opacity-45"
+                      className="grid h-9 w-9 shrink-0 place-items-center text-[#7f82ff] transition hover:text-[#9799ff] disabled:cursor-not-allowed disabled:text-slate-500"
                       type="button"
                       disabled={!canSendAi}
+                      title={canSendAi ? "Send AI edit" : undefined}
+                      aria-label="Send AI edit"
                       onClick={() => void handleAiEdit()}
                     >
                       {isRunningAi ? (
@@ -1250,14 +1310,27 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           <section className="relative min-h-0 flex-1 overflow-hidden mymake-grid-canvas">
             <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_34%_18%,rgba(89,97,180,0.13),transparent_24%),radial-gradient(circle_at_70%_52%,rgba(255,255,255,0.02),transparent_28%)]" />
 
-            <div className="relative flex h-full items-center justify-center px-2 pb-2 pt-2">
+            <div
+              className={clsx(
+                "relative flex h-full",
+                isDesktopPreview
+                  ? "items-stretch justify-stretch p-0"
+                  : "items-start justify-center px-2 pb-2 pt-2",
+              )}
+            >
               {currentProject ? (
-                <div className="flex h-full w-full items-center justify-center overflow-auto">
+                <div
+                  className={clsx(
+                    "mymake-scrollbar-none flex h-full w-full overflow-auto",
+                    isDesktopPreview ? "items-stretch justify-stretch" : "items-start justify-center",
+                  )}
+                >
                   <div
                     className="relative transition-all duration-300"
                     style={{
                       width: currentDevice.width,
                       maxWidth: currentDevice.maxWidth,
+                      height: isDesktopPreview ? "100%" : undefined,
                     }}
                   >
                     <iframe
@@ -1265,7 +1338,12 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                       ref={iframeRef}
                       title={`${currentProject.project.name} preview`}
                       src={`${currentProject.preview.url}/`}
-                      className="h-[calc(100vh-74px)] min-h-[600px] w-full rounded-[20px] border border-white/[0.06] bg-[#12141a] shadow-[0_30px_60px_rgba(0,0,0,0.22)]"
+                      className={clsx(
+                        "w-full bg-[#12141a]",
+                        isDesktopPreview
+                          ? "h-full min-h-0 border-0 shadow-none"
+                          : "h-[calc(100vh-76px)] min-h-[620px] rounded-[20px] border border-white/[0.06] shadow-[0_30px_60px_rgba(0,0,0,0.22)]",
+                      )}
                       onLoad={() => {
                         iframeRef.current?.contentWindow?.postMessage(
                           {
@@ -1277,7 +1355,12 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                       }}
                     />
                     {showPreviewOverlay ? (
-                      <div className="pointer-events-none absolute inset-0 grid place-items-center rounded-[20px] bg-[linear-gradient(180deg,rgba(15,16,20,0.08),rgba(15,16,20,0.42))]">
+                      <div
+                        className={clsx(
+                          "pointer-events-none absolute inset-0 grid place-items-center bg-[linear-gradient(180deg,rgba(15,16,20,0.08),rgba(15,16,20,0.42))]",
+                          !isDesktopPreview && "rounded-[20px]",
+                        )}
+                      >
                         <div className="pointer-events-auto w-[min(420px,calc(100%-32px))] rounded-[22px] border border-white/[0.08] bg-[#17191f]/95 px-6 py-5 text-left shadow-[0_20px_60px_rgba(0,0,0,0.32)] backdrop-blur">
                           <div className="flex items-center gap-3">
                             <div className="grid h-10 w-10 place-items-center rounded-full bg-[#232737] text-[#cfd6ff]">
@@ -1329,18 +1412,11 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                     Import your first design project
                   </h2>
                   <p className="mt-4 text-base leading-8 text-slate-400">
-                    Upload a React app zip from the toolbar or prompt rail to open the same Figma Make style workspace shown in your screenshot.
+                    Upload a React app zip from the toolbar to open the same Figma Make style workspace shown in your screenshot.
                   </p>
                 </div>
               )}
             </div>
-
-            <button
-              className="absolute bottom-4 right-4 grid h-8 w-8 place-items-center rounded-full border border-white/[0.1] bg-[#2a2b2f] text-sm text-slate-300 transition hover:bg-[#34353b]"
-              type="button"
-            >
-              ?
-            </button>
 
             {isCodePanelOpen ? (
               <>
@@ -1384,7 +1460,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                       >
                         Discard
                       </button>
-                      <ToolbarIconButton onClick={() => setIsCodePanelOpen(false)}>
+                      <ToolbarIconButton label="Close code panel" onClick={() => setIsCodePanelOpen(false)}>
                         <Code2 className="h-4 w-4" />
                       </ToolbarIconButton>
                     </div>

@@ -24,6 +24,7 @@ import {
   ensurePreviewRunner,
   getPreviewRunnerInfo,
   restartPreviewRunner,
+  stopPreviewRunner,
   warmPreviewRunner,
 } from "@/lib/server/preview-manager";
 import {
@@ -732,6 +733,19 @@ export async function getDashboardSnapshot(
     aiModels: listAiModels(),
     defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
   };
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  getProjectRow(projectId);
+
+  try {
+    await stopPreviewRunner(projectId);
+  } catch {
+    // Best effort. The project should still be removable if no runner is active.
+  }
+
+  getDb().prepare("DELETE FROM projects WHERE id = ?").run(projectId);
+  await fs.rm(getProjectPaths(projectId).root, { recursive: true, force: true });
 }
 
 export async function createProjectFromUpload(

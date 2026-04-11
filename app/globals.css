@@ -75,3 +75,12 @@ textarea {
 .code-font {
   font-family: var(--font-geist-mono), monospace;
 }
+
+.mymake-scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.mymake-scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
