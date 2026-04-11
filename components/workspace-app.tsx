@@ -333,10 +333,14 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([]);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isPreviewFrameReady, setIsPreviewFrameReady] = useState(false);
+  const [isPreviewSlow, setIsPreviewSlow] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const projectUploadInputRef = useRef<HTMLInputElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const previousPreviewIdentityRef = useRef<string | null>(null);
+  const previousRevisionIdRef = useRef<string | null>(null);
 
   const currentProject = snapshot.currentProject;
   const revisions = currentProject?.revisions || [];
@@ -344,6 +348,10 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const currentDevice = DEVICE_PRESETS[devicePreset];
   const displayRoute = routeLabel(currentRoute);
   const hasUnsavedEdits = Boolean(editorFilePath && editorContent !== editorBaselineContent);
+  const previewIdentity = currentProject
+    ? `${currentProject.project.id}:${currentProject.preview.instanceId ?? "cold"}`
+    : null;
+  const isPreviewStarting = Boolean(currentProject && currentProject.preview.status === "starting");
   const enabledAiModels = useMemo(
     () => snapshot.aiModels.filter((model) => model.enabled),
     [snapshot.aiModels],
@@ -410,6 +418,51 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   }, [currentProject?.project.id]);
 
   useEffect(() => {
+    if (!previewIdentity) {
+      previousPreviewIdentityRef.current = null;
+      setIsPreviewFrameReady(false);
+      setIsPreviewSlow(false);
+      return;
+    }
+
+    if (previousPreviewIdentityRef.current === previewIdentity) {
+      return;
+    }
+
+    previousPreviewIdentityRef.current = previewIdentity;
+    setIsPreviewFrameReady(false);
+    setIsPreviewSlow(false);
+
+    const timeout = window.setTimeout(() => setIsPreviewSlow(true), 3500);
+    return () => window.clearTimeout(timeout);
+  }, [previewIdentity]);
+
+  useEffect(() => {
+    if (!currentProject?.project.id) {
+      previousRevisionIdRef.current = null;
+      return;
+    }
+
+    const nextRevisionId = currentProject.project.currentRevisionId;
+    const previousRevisionId = previousRevisionIdRef.current;
+    previousRevisionIdRef.current = nextRevisionId;
+
+    if (
+      !nextRevisionId ||
+      !previousRevisionId ||
+      nextRevisionId === previousRevisionId ||
+      !previewIdentity ||
+      previousPreviewIdentityRef.current !== previewIdentity
+    ) {
+      return;
+    }
+
+    setIsPreviewFrameReady(false);
+    setIsPreviewSlow(false);
+    void iframeRef.current?.contentWindow?.location.reload();
+  }, [currentProject?.project.currentRevisionId, currentProject?.project.id, previewIdentity]);
+
+  useEffect(() => {
     function handleMessage(event: MessageEvent) {
       if (!event.data || event.data.channel !== "MYMAKE_PREVIEW_BRIDGE") {
         return;
@@ -434,6 +487,8 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       }
 
       if (event.data.type === "MYMAKE_ROUTE" || event.data.type === "MYMAKE_READY") {
+        setIsPreviewFrameReady(true);
+        setIsPreviewSlow(false);
         setCurrentRoute(event.data.payload?.route || "/");
       }
     }
@@ -730,6 +785,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   );
   const composerNotice = error || feedback;
   const latestRevision = revisions[0] || null;
+  const showPreviewOverlay = Boolean(currentProject && (!isPreviewFrameReady || isPreviewStarting));
 
   const reasoningBullets = useMemo(() => {
     if (!currentProject) {
@@ -1062,18 +1118,18 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
               {currentProject ? (
                 <div className="flex h-full w-full items-center justify-center overflow-auto">
                   <div
-                    className="transition-all duration-300"
+                    className="relative transition-all duration-300"
                     style={{
                       width: currentDevice.width,
                       maxWidth: currentDevice.maxWidth,
                     }}
                   >
                     <iframe
-                      key={`${currentProject.project.id}-${currentProject.project.currentRevisionId}-${devicePreset}`}
+                      key={`${currentProject.project.id}-${currentProject.preview.instanceId ?? "cold"}`}
                       ref={iframeRef}
                       title={`${currentProject.project.name} preview`}
                       src={`${currentProject.preview.url}/`}
-                      className="h-[calc(100vh-74px)] min-h-[600px] w-full rounded-[20px] border border-white/[0.06] bg-white shadow-[0_30px_60px_rgba(0,0,0,0.22)]"
+                      className="h-[calc(100vh-74px)] min-h-[600px] w-full rounded-[20px] border border-white/[0.06] bg-[#12141a] shadow-[0_30px_60px_rgba(0,0,0,0.22)]"
                       onLoad={() => {
                         iframeRef.current?.contentWindow?.postMessage(
                           {
@@ -1084,6 +1140,48 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                         );
                       }}
                     />
+                    {showPreviewOverlay ? (
+                      <div className="pointer-events-none absolute inset-0 grid place-items-center rounded-[20px] bg-[linear-gradient(180deg,rgba(15,16,20,0.08),rgba(15,16,20,0.42))]">
+                        <div className="pointer-events-auto w-[min(420px,calc(100%-32px))] rounded-[22px] border border-white/[0.08] bg-[#17191f]/95 px-6 py-5 text-left shadow-[0_20px_60px_rgba(0,0,0,0.32)] backdrop-blur">
+                          <div className="flex items-center gap-3">
+                            <div className="grid h-10 w-10 place-items-center rounded-full bg-[#232737] text-[#cfd6ff]">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            </div>
+                            <div>
+                              <p className="text-sm font-medium text-white">
+                                {isPreviewSlow
+                                  ? "Reconnecting the live preview"
+                                  : "Warming the live preview"}
+                              </p>
+                              <p className="mt-1 text-xs leading-5 text-slate-400">
+                                {isPreviewSlow
+                                  ? "The runner is taking longer than usual. MyMake is keeping the connection alive and will recover automatically."
+                                  : "Keeping the preview runner hot so edits can appear without a full workspace refresh."}
+                              </p>
+                            </div>
+                          </div>
+                          {isPreviewSlow ? (
+                            <div className="mt-4 flex items-center gap-2">
+                              <button
+                                className="rounded-full border border-white/[0.08] bg-[#232737] px-3 py-1.5 text-xs font-medium text-slate-100 transition hover:bg-[#2b3045]"
+                                type="button"
+                                onClick={() => {
+                                  setIsPreviewFrameReady(false);
+                                  setIsPreviewSlow(false);
+                                  void refreshProject(currentProject.project.id, editorFilePath);
+                                  void iframeRef.current?.contentWindow?.location.reload();
+                                }}
+                              >
+                                Reconnect preview
+                              </button>
+                              <span className="text-[11px] text-slate-500">
+                                The current runner stays alive in the background.
+                              </span>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ) : (

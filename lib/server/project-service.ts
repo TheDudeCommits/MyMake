@@ -20,7 +20,12 @@ import {
   resolveInsideRoot,
   toPosixPath,
 } from "@/lib/server/path-utils";
-import { ensurePreviewRunner, restartPreviewRunner } from "@/lib/server/preview-manager";
+import {
+  ensurePreviewRunner,
+  getPreviewRunnerInfo,
+  restartPreviewRunner,
+  warmPreviewRunner,
+} from "@/lib/server/preview-manager";
 import {
   detectPackageManager,
   normalizeImportedProject,
@@ -526,12 +531,16 @@ export async function getWorkspaceSnapshot(
   } = {},
 ): Promise<ProjectWorkspace> {
   let project = getProjectRow(projectId);
+  let livePreview = getPreviewRunnerInfo(projectId);
   let previewStatus: ProjectWorkspace["preview"]["status"] =
-    project.status === "error" ? "error" : project.status === "ready" ? "ready" : "starting";
+    project.status === "error"
+      ? "error"
+      : livePreview?.status || (project.status === "ready" ? "starting" : "starting");
 
   if (options.ensurePreview) {
     try {
       await ensurePreviewRunner(projectId);
+      livePreview = getPreviewRunnerInfo(projectId);
       previewStatus = "ready";
     } catch {
       getDb()
@@ -545,6 +554,8 @@ export async function getWorkspaceSnapshot(
     }
 
     project = getProjectRow(projectId);
+  } else if (project.status !== "error") {
+    warmPreviewRunner(projectId);
   }
 
   const files = await listProjectFiles(project.extractedPath);
@@ -568,7 +579,8 @@ export async function getWorkspaceSnapshot(
     preview: {
       url: `/preview/${projectId}`,
       status: project.status === "error" ? "error" : previewStatus,
-      port: project.previewPort,
+      port: livePreview?.port ?? project.previewPort,
+      instanceId: livePreview?.instanceId ?? null,
     },
   };
 }
@@ -668,7 +680,7 @@ export async function createProjectFromUpload(
 
     await ensurePreviewRunner(projectId);
     await fs.rm(unpackDir, { recursive: true, force: true });
-    return getWorkspaceSnapshot(projectId, { ensurePreview: true });
+    return getWorkspaceSnapshot(projectId, { ensurePreview: false });
   } catch (error) {
     getDb().prepare("UPDATE projects SET status = ? WHERE id = ?").run("error", projectId);
     throw error;
@@ -713,7 +725,7 @@ export async function saveProjectFile(
   });
 
   await maybeRefreshPreview(projectId, [relativePath]);
-  return getWorkspaceSnapshot(projectId, { currentFilePath: relativePath, ensurePreview: true });
+  return getWorkspaceSnapshot(projectId, { currentFilePath: relativePath, ensurePreview: false });
 }
 
 export async function saveAttachments(
@@ -848,7 +860,7 @@ export async function applyAiEdit(
     })),
     workspace: await getWorkspaceSnapshot(payload.projectId, {
       currentFilePath: payload.currentFilePath || changedPaths[0] || null,
-      ensurePreview: true,
+      ensurePreview: false,
     }),
   };
 }
@@ -874,7 +886,7 @@ async function switchToRevision(
     .run(targetRevision.id, restoredManifestHash, nowIso(), projectId);
 
   await restartPreviewRunner(projectId);
-  return getWorkspaceSnapshot(projectId, { ensurePreview: true });
+  return getWorkspaceSnapshot(projectId, { ensurePreview: false });
 }
 
 export async function undoProject(projectId: string): Promise<ProjectWorkspace> {

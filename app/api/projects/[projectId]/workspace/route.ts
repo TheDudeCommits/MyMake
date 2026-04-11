@@ -14,7 +14,7 @@ export async function GET(
     const filePath = url.searchParams.get("filePath");
     const workspace = await getWorkspaceSnapshot(params.projectId, {
       currentFilePath: filePath,
-      ensurePreview: true,
+      ensurePreview: false,
     });
     return NextResponse.json({
       projects: await listProjects(),

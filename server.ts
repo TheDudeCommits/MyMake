@@ -14,7 +14,9 @@ import {
 import {
   ensurePreviewRunner,
   getActivePreviewProjectId,
+  getPreviewRunnerInfo,
   getPreviewTargetUrl,
+  warmPreviewRunner,
 } from "@/lib/server/preview-manager";
 
 declare module "http" {
@@ -103,6 +105,105 @@ function injectPreviewBridge(html: string, projectId: string): string {
   }
 
   return `${withBootstrap}${bridge}`;
+}
+
+function buildPreviewLoadingHtml(projectId: string, state: "starting" | "error"): string {
+  const headline = state === "error" ? "Reconnecting preview..." : "Starting preview...";
+  const body =
+    state === "error"
+      ? "The last preview session dropped. MyMake is restarting the runner and will retry automatically."
+      : "MyMake is warming the uploaded app in the background. This frame will reconnect automatically as soon as the runner is ready.";
+
+  return `<!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+          :root {
+            color-scheme: dark;
+          }
+
+          html, body {
+            margin: 0;
+            min-height: 100%;
+            background:
+              radial-gradient(circle at top, rgba(97, 103, 255, 0.18), transparent 26%),
+              #0f1117;
+            color: #eef2ff;
+            font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+          }
+
+          body {
+            display: grid;
+            place-items: center;
+            padding: 24px;
+          }
+
+          .card {
+            width: min(420px, 100%);
+            border-radius: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(23, 25, 33, 0.94);
+            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+            padding: 24px 26px;
+          }
+
+          .eyebrow {
+            font-size: 11px;
+            letter-spacing: 0.22em;
+            text-transform: uppercase;
+            color: #99a2bd;
+          }
+
+          h1 {
+            margin: 14px 0 10px;
+            font-size: 20px;
+            line-height: 1.2;
+          }
+
+          p {
+            margin: 0;
+            line-height: 1.7;
+            color: #b8c0d9;
+          }
+
+          .loader {
+            margin-top: 18px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #dbe4ff;
+            font-size: 13px;
+          }
+
+          .dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 999px;
+            background: #6b70ff;
+            box-shadow: 0 0 18px rgba(107, 112, 255, 0.55);
+            animation: pulse 0.9s ease-in-out infinite alternate;
+          }
+
+          @keyframes pulse {
+            from { transform: scale(0.9); opacity: 0.7; }
+            to { transform: scale(1.15); opacity: 1; }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="eyebrow">MyMake preview</div>
+          <h1>${headline}</h1>
+          <p>${body}</p>
+          <div class="loader"><span class="dot"></span> Project: ${projectId}</div>
+        </div>
+        <script>
+          window.setTimeout(() => window.location.reload(), 900);
+        </script>
+      </body>
+    </html>`;
 }
 
 function rewritePreviewPath(pathname: string, projectId: string): string {
@@ -237,7 +338,22 @@ const previewStreamProxy = createProxyMiddleware<Request, Response>({
 });
 
 async function dispatchPreviewProxy(req: Request, res: Response, nextFn: NextFunction) {
+  const projectId = req.mymakeProjectId;
+  if (!projectId) {
+    nextFn();
+    return;
+  }
+
   if (isHtmlRequest(req)) {
+    const runner = getPreviewRunnerInfo(projectId);
+    if (!runner || runner.status !== "ready") {
+      warmPreviewRunner(projectId);
+      res
+        .status(runner?.status === "error" ? 503 : 202)
+        .send(buildPreviewLoadingHtml(projectId, runner?.status === "error" ? "error" : "starting"));
+      return;
+    }
+
     await previewDocumentProxy(req, res, nextFn);
     return;
   }

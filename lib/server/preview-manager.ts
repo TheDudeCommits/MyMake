@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -12,6 +13,8 @@ interface PreviewRunnerState {
   projectId: string;
   port: number;
   targetUrl: string;
+  instanceId: string;
+  lastAccessedAt: number;
   status: RunnerStatus;
   process: ChildProcess;
 }
@@ -21,6 +24,9 @@ interface PreviewRuntimeState {
   runners: Map<string, PreviewRunnerState>;
   startPromises: Map<string, Promise<PreviewRunnerState>>;
 }
+
+const MAX_WARM_PREVIEW_RUNNERS = 2;
+const STALE_RUNNER_TTL_MS = 15 * 60 * 1000;
 
 declare global {
   // eslint-disable-next-line no-var
@@ -37,6 +43,11 @@ function getRuntimeState(): PreviewRuntimeState {
   }
 
   return global.__MYMAKE_PREVIEW_RUNTIME__;
+}
+
+function touchRunner(runner: PreviewRunnerState): void {
+  runner.lastAccessedAt = Date.now();
+  getRuntimeState().activeProjectId = runner.projectId;
 }
 
 async function getAvailablePort(): Promise<number> {
@@ -171,6 +182,43 @@ async function getRunnerSpec(
   throw new Error("Unsupported preview runtime for this project.");
 }
 
+async function prunePreviewRunners(preferredProjectId: string): Promise<void> {
+  const runtime = getRuntimeState();
+  const now = Date.now();
+  const candidates = [...runtime.runners.values()]
+    .filter(
+      (runner) =>
+        runner.projectId !== preferredProjectId &&
+        !runtime.startPromises.has(runner.projectId),
+    )
+    .sort((left, right) => left.lastAccessedAt - right.lastAccessedAt);
+
+  for (const runner of candidates) {
+    if (runtime.runners.size <= MAX_WARM_PREVIEW_RUNNERS) {
+      break;
+    }
+
+    if (now - runner.lastAccessedAt < STALE_RUNNER_TTL_MS) {
+      continue;
+    }
+
+    await stopPreviewRunner(runner.projectId);
+  }
+
+  while (runtime.runners.size >= MAX_WARM_PREVIEW_RUNNERS && candidates.length) {
+    const oldestRunner = candidates.shift();
+    if (!oldestRunner) {
+      break;
+    }
+
+    if (!runtime.runners.has(oldestRunner.projectId)) {
+      continue;
+    }
+
+    await stopPreviewRunner(oldestRunner.projectId);
+  }
+}
+
 export async function stopPreviewRunner(projectId: string): Promise<void> {
   const runtime = getRuntimeState();
   runtime.startPromises.delete(projectId);
@@ -208,13 +256,12 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
 
   const existing = runtime.runners.get(projectId);
   if (existing && existing.status !== "error" && !existing.process.killed) {
+    touchRunner(existing);
     return existing;
   }
 
   const startPromise = (async () => {
-    if (runtime.activeProjectId && runtime.activeProjectId !== projectId) {
-      await stopPreviewRunner(runtime.activeProjectId);
-    }
+    await prunePreviewRunners(projectId);
 
     const project = await loadProject(projectId);
     await normalizeImportedProject(project.extracted_path);
@@ -232,12 +279,14 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
       projectId,
       port,
       targetUrl,
+      instanceId: randomUUID(),
+      lastAccessedAt: Date.now(),
       status: "starting",
       process: child,
     };
 
     runtime.runners.set(projectId, runner);
-    runtime.activeProjectId = projectId;
+    touchRunner(runner);
 
     child.stdout?.on("data", (chunk) => {
       process.stdout.write(`[preview:${projectId}] ${chunk}`);
@@ -255,6 +304,7 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
     try {
       await waitForRunner(targetUrl);
       runner.status = "ready";
+      touchRunner(runner);
       getDb()
         .prepare(
           `UPDATE projects
@@ -292,6 +342,7 @@ export async function getPreviewTargetUrl(projectId: string): Promise<string> {
   const runtime = getRuntimeState();
   const existing = runtime.runners.get(projectId);
   if (existing) {
+    touchRunner(existing);
     return existing.targetUrl;
   }
 
@@ -301,4 +352,41 @@ export async function getPreviewTargetUrl(projectId: string): Promise<string> {
 
 export function getActivePreviewProjectId(): string | null {
   return getRuntimeState().activeProjectId;
+}
+
+export function getPreviewRunnerInfo(projectId: string): {
+  status: RunnerStatus;
+  port: number;
+  targetUrl: string;
+  instanceId: string;
+} | null {
+  const runner = getRuntimeState().runners.get(projectId);
+  if (!runner || runner.process.killed) {
+    return null;
+  }
+
+  return {
+    status: runner.status,
+    port: runner.port,
+    targetUrl: runner.targetUrl,
+    instanceId: runner.instanceId,
+  };
+}
+
+export function warmPreviewRunner(projectId: string): void {
+  const runtime = getRuntimeState();
+  const existing = runtime.runners.get(projectId);
+
+  if (existing && existing.status !== "error" && !existing.process.killed) {
+    touchRunner(existing);
+    return;
+  }
+
+  if (runtime.startPromises.has(projectId)) {
+    return;
+  }
+
+  void ensurePreviewRunner(projectId).catch((error) => {
+    process.stderr.write(`[preview:${projectId}] warm start failed: ${String(error)}\n`);
+  });
 }

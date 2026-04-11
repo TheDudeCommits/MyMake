@@ -73,6 +73,7 @@ export interface PreviewDescriptor {
   url: string;
   status: "ready" | "starting" | "error";
   port: number | null;
+  instanceId: string | null;
 }
 
 export interface AiModelOption {
