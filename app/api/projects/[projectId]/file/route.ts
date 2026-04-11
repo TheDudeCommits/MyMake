@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
+import { DEFAULT_AI_MODEL_KEY, listAiModels } from "@/lib/server/ai";
 import {
   listProjects,
   readProjectFile,
@@ -45,6 +46,8 @@ export async function PUT(
       projects: await listProjects(),
       currentProjectId: params.projectId,
       currentProject: workspace,
+      aiModels: listAiModels(),
+      defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
     });
   } catch (error) {
     return NextResponse.json(

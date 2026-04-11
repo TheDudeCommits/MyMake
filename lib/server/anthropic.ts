@@ -171,6 +171,7 @@ function normalizeAiResponseShape(value: unknown): z.infer<typeof aiResponseSche
 }
 
 export async function requestAiEdit(params: {
+  model?: string;
   prompt: string;
   selection: SelectionPayload | null;
   contextFiles: ContextFile[];
@@ -240,7 +241,7 @@ export async function requestAiEdit(params: {
   }
 
   const response = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: params.model || "claude-sonnet-4-20250514",
     max_tokens: 4096,
     system: systemPrompt,
     messages: [
@@ -259,3 +260,5 @@ export async function requestAiEdit(params: {
   const parsed = normalizeAiResponseShape(extractJsonFromText(responseText));
   return parsed;
 }
+
+export { requestAiEdit as requestAnthropicAiEdit };

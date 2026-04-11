@@ -2,6 +2,7 @@ import path from "node:path";
 
 interface EnvConfig {
   anthropicApiKey?: string;
+  openaiApiKey?: string;
   appPasscode: string;
   databasePath: string;
   port: number;
@@ -23,6 +24,7 @@ export function getEnv(): EnvConfig {
 
   cachedEnv = {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    openaiApiKey: process.env.OPENAI_API_KEY,
     appPasscode:
       process.env.APP_PASSCODE ||
       (process.env.NODE_ENV === "production"

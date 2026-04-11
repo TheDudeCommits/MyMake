@@ -3,6 +3,8 @@ export type ProjectStatus = "installing" | "ready" | "error" | "unsupported";
 export type RevisionSource = "upload" | "ai" | "manual" | "undo" | "redo";
 export type DevicePreset = "desktop" | "tablet" | "mobile";
 export type ProjectRuntime = "next" | "vite";
+export type AiProvider = "openai" | "anthropic";
+export type AiModelKey = "openai-chatgpt-5-2" | "anthropic-sonnet-4-6";
 
 export interface ProjectRecord {
   id: string;
@@ -73,6 +75,13 @@ export interface PreviewDescriptor {
   port: number | null;
 }
 
+export interface AiModelOption {
+  key: AiModelKey;
+  label: string;
+  provider: AiProvider;
+  enabled: boolean;
+}
+
 export interface ProjectWorkspace {
   project: ProjectRecord;
   revisions: RevisionRecord[];
@@ -87,6 +96,8 @@ export interface DashboardSnapshot {
   projects: ProjectRecord[];
   currentProjectId: string | null;
   currentProject: ProjectWorkspace | null;
+  aiModels: AiModelOption[];
+  defaultAiModelKey: AiModelKey;
 }
 
 export interface AiEditRequestPayload {
@@ -95,6 +106,7 @@ export interface AiEditRequestPayload {
   prompt: string;
   selection: SelectionPayload | null;
   attachmentIds: string[];
+  aiModelKey?: AiModelKey | null;
   currentFilePath?: string | null;
 }
 

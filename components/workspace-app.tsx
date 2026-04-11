@@ -24,6 +24,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
+  AiModelKey,
   AttachmentRecord,
   DashboardSnapshot,
   DevicePreset,
@@ -40,6 +41,7 @@ const DEVICE_PRESETS: Record<DevicePreset, { label: string; width: string; icon:
   };
 
 const DEVICE_ORDER: DevicePreset[] = ["desktop", "tablet", "mobile"];
+const AI_MODEL_STORAGE_KEY = "mymake-selected-ai-model";
 
 type SnapshotResponse = DashboardSnapshot & {
   ai?: {
@@ -285,6 +287,9 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const [devicePreset, setDevicePreset] = useState<DevicePreset>("desktop");
   const [isPicking, setIsPicking] = useState(false);
   const [isCodePanelOpen, setIsCodePanelOpen] = useState(false);
+  const [selectedAiModelKey, setSelectedAiModelKey] = useState<AiModelKey>(
+    initialSnapshot.defaultAiModelKey,
+  );
   const [selectedElement, setSelectedElement] = useState<SelectionPayload | null>(null);
   const [currentRoute, setCurrentRoute] = useState("/");
   const [prompt, setPrompt] = useState("");
@@ -316,6 +321,18 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const previewWidth = currentDevice.width;
   const displayRoute = routeLabel(currentRoute);
   const hasUnsavedEdits = Boolean(editorFilePath && editorContent !== editorBaselineContent);
+  const enabledAiModels = useMemo(
+    () => snapshot.aiModels.filter((model) => model.enabled),
+    [snapshot.aiModels],
+  );
+  const fallbackAiModelKey = enabledAiModels[0]?.key || snapshot.defaultAiModelKey;
+  const selectedAiModel = useMemo(
+    () =>
+      snapshot.aiModels.find((model) => model.key === selectedAiModelKey) ||
+      snapshot.aiModels.find((model) => model.key === fallbackAiModelKey) ||
+      null,
+    [fallbackAiModelKey, selectedAiModelKey, snapshot.aiModels],
+  );
   const editableFiles = useMemo(
     () =>
       currentProject
@@ -325,6 +342,37 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
         : [],
     [currentProject],
   );
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const storedModelKey = window.localStorage.getItem(AI_MODEL_STORAGE_KEY) as
+      | AiModelKey
+      | null;
+    if (!storedModelKey) {
+      return;
+    }
+
+    if (snapshot.aiModels.some((model) => model.key === storedModelKey && model.enabled)) {
+      setSelectedAiModelKey(storedModelKey);
+    }
+  }, [snapshot.aiModels]);
+
+  useEffect(() => {
+    if (!snapshot.aiModels.some((model) => model.key === selectedAiModelKey && model.enabled)) {
+      setSelectedAiModelKey(fallbackAiModelKey);
+    }
+  }, [fallbackAiModelKey, selectedAiModelKey, snapshot.aiModels]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(AI_MODEL_STORAGE_KEY, selectedAiModelKey);
+  }, [selectedAiModelKey]);
 
   useEffect(() => {
     setEditorFilePath(currentProject?.currentFilePath || null);
@@ -547,9 +595,14 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       return;
     }
 
+    if (!selectedAiModel?.enabled) {
+      setError("The selected AI model is not configured yet.");
+      return;
+    }
+
     setIsRunningAi(true);
     setError(null);
-    setFeedback("Claude is updating the selected UI and refreshing the preview...");
+    setFeedback(`${selectedAiModel.label} is updating the selected UI and refreshing the preview...`);
 
     try {
       const response = await fetch(`/api/projects/${currentProject.project.id}/ai-edit`, {
@@ -563,6 +616,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           prompt,
           selection: selectedElement,
           attachmentIds: selectedAttachmentIds,
+          aiModelKey: selectedAiModel.key,
           currentFilePath: editorFilePath,
         }),
       });
@@ -953,14 +1007,36 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   </RailIconButton>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <div className="rounded-full border border-white/[0.08] bg-[#2f2f31] px-3 py-1 text-[11px] text-slate-300">
-                    Claude Sonnet 4
+              <div className="flex items-center gap-2">
+                  <div className="relative">
+                    <select
+                      className="h-8 appearance-none rounded-full border border-white/[0.08] bg-[#2f2f31] px-3 pr-8 text-[11px] text-slate-300 outline-none transition hover:bg-[#383940]"
+                      value={selectedAiModel?.key || fallbackAiModelKey}
+                      onChange={(event) =>
+                        setSelectedAiModelKey(event.target.value as AiModelKey)
+                      }
+                    >
+                      {snapshot.aiModels.map((model) => (
+                        <option key={model.key} value={model.key} disabled={!model.enabled}>
+                          {model.enabled ? model.label : `${model.label} (Needs key)`}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rotate-90 text-slate-500">
+                      <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5">
+                        <path d="M6 3L11 8L6 13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </div>
                   </div>
                   <button
                     className="grid h-8 w-8 place-items-center rounded-full bg-[#6467ff] text-white transition hover:bg-[#7073ff] disabled:cursor-not-allowed disabled:opacity-45"
                     type="button"
-                    disabled={isRunningAi || !currentProject?.project.currentRevisionId || !prompt.trim()}
+                    disabled={
+                      isRunningAi ||
+                      !currentProject?.project.currentRevisionId ||
+                      !prompt.trim() ||
+                      !selectedAiModel?.enabled
+                    }
                     onClick={() => void handleAiEdit()}
                   >
                     {isRunningAi ? (

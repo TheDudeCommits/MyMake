@@ -5,7 +5,12 @@ import { spawn } from "node:child_process";
 
 import { nanoid } from "nanoid";
 
-import { requestAiEdit, type ContextFile } from "@/lib/server/anthropic";
+import {
+  DEFAULT_AI_MODEL_KEY,
+  listAiModels,
+  requestAiEdit,
+} from "@/lib/server/ai";
+import type { ContextFile } from "@/lib/server/anthropic";
 import { getDb } from "@/lib/server/db";
 import { getEnv } from "@/lib/server/env";
 import {
@@ -563,6 +568,8 @@ export async function getDashboardSnapshot(
     currentProject: currentProjectId
       ? await getWorkspaceSnapshot(currentProjectId, { ensurePreview: true })
       : null,
+    aiModels: listAiModels(),
+    defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
   };
 }
 
@@ -783,6 +790,7 @@ export async function applyAiEdit(
   );
 
   const aiResult = await requestAiEdit({
+    aiModelKey: payload.aiModelKey,
     prompt: payload.prompt,
     selection: payload.selection,
     contextFiles,

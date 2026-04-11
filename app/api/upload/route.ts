@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { DEFAULT_AI_MODEL_KEY, listAiModels } from "@/lib/server/ai";
 import { createProjectFromUpload, listProjects } from "@/lib/server/project-service";
 
 export const runtime = "nodejs";
@@ -18,6 +19,8 @@ export async function POST(request: Request) {
       projects: await listProjects(),
       currentProjectId: workspace.project.id,
       currentProject: workspace,
+      aiModels: listAiModels(),
+      defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
     });
   } catch (error) {
     return NextResponse.json(

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
+import { DEFAULT_AI_MODEL_KEY, listAiModels } from "@/lib/server/ai";
 import { applyAiEdit, listProjects } from "@/lib/server/project-service";
 
 export const runtime = "nodejs";
@@ -30,6 +31,7 @@ const bodySchema = z.object({
   prompt: z.string().min(1),
   selection: selectionSchema,
   attachmentIds: z.array(z.string()).default([]),
+  aiModelKey: z.enum(["openai-chatgpt-5-2", "anthropic-sonnet-4-6"]).nullable().optional(),
   currentFilePath: z.string().nullable().optional(),
 });
 
@@ -48,6 +50,8 @@ export async function POST(
       projects: await listProjects(),
       currentProjectId: params.projectId,
       currentProject: result.workspace,
+      aiModels: listAiModels(),
+      defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
       ai: {
         summary: result.summary,
         warnings: result.warnings,
