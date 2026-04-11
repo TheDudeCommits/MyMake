@@ -1,7 +1,11 @@
 import type { AiModelKey, AiModelOption, AnthropicAttachment, SelectionPayload } from "@/lib/types";
 import { getEnv } from "@/lib/server/env";
-import { requestAnthropicAiEdit, type ContextFile } from "@/lib/server/anthropic";
-import { requestOpenAiEdit } from "@/lib/server/openai";
+import {
+  requestAnthropicAiEdit,
+  requestAnthropicPatchEdit,
+  type ContextFile,
+} from "@/lib/server/anthropic";
+import { requestOpenAiEdit, requestOpenAiPatchEdit } from "@/lib/server/openai";
 
 interface ServerAiModelConfig {
   key: AiModelKey;
@@ -85,6 +89,41 @@ export async function requestAiEdit(params: {
     model: model.apiModel,
     prompt: params.prompt,
     selection: params.selection,
+    contextFiles: params.contextFiles,
+    attachments: params.attachments,
+  });
+}
+
+export async function requestAiPatchEdit(params: {
+  aiModelKey?: AiModelKey | null;
+  prompt: string;
+  selection: SelectionPayload | null;
+  currentFilePath: string;
+  contextFiles: ContextFile[];
+  attachments: AnthropicAttachment[];
+}): Promise<{
+  summary: string;
+  warnings: string[];
+  operations: Array<{ path: string; search: string; replace: string; reason?: string }>;
+}> {
+  const model = resolveAiModel(params.aiModelKey);
+
+  if (model.provider === "openai") {
+    return requestOpenAiPatchEdit({
+      model: model.apiModel,
+      prompt: params.prompt,
+      selection: params.selection,
+      currentFilePath: params.currentFilePath,
+      contextFiles: params.contextFiles,
+      attachments: params.attachments,
+    });
+  }
+
+  return requestAnthropicPatchEdit({
+    model: model.apiModel,
+    prompt: params.prompt,
+    selection: params.selection,
+    currentFilePath: params.currentFilePath,
     contextFiles: params.contextFiles,
     attachments: params.attachments,
   });

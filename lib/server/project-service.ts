@@ -9,6 +9,7 @@ import {
   DEFAULT_AI_MODEL_KEY,
   listAiModels,
   requestAiEdit,
+  requestAiPatchEdit,
 } from "@/lib/server/ai";
 import type { ContextFile } from "@/lib/server/anthropic";
 import { getDb } from "@/lib/server/db";
@@ -52,6 +53,7 @@ import type {
   ProjectRecord,
   ProjectWorkspace,
   RevisionRecord,
+  SelectionPayload,
 } from "@/lib/types";
 
 const CONFIG_RESTART_FILES = new Set([
@@ -339,6 +341,10 @@ const IMPORTABLE_EXTENSIONS = [
   ".json",
 ];
 
+const MAX_CONTEXT_FILE_CHARS = 24_000;
+const MAX_CONTEXT_TOTAL_CHARS = 90_000;
+const LARGE_FILE_EDIT_THRESHOLD = 120_000;
+
 function collectRelativeImports(content: string): string[] {
   const imports = new Set<string>();
   const patterns = [
@@ -355,6 +361,105 @@ function collectRelativeImports(content: string): string[] {
   }
 
   return [...imports];
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractQuotedPromptPhrases(prompt: string): string[] {
+  const phrases = new Set<string>();
+  for (const pattern of [/"([^"]{2,})"/g, /'([^']{2,})'/g]) {
+    for (const match of prompt.matchAll(pattern)) {
+      const phrase = (match[1] || "").trim();
+      if (phrase.length >= 2) {
+        phrases.add(phrase);
+      }
+    }
+  }
+
+  return [...phrases];
+}
+
+function buildLargeFileExcerpt(params: {
+  content: string;
+  filePath: string;
+  prompt: string;
+  selection: SelectionPayload | null | undefined;
+}): string {
+  const anchors = new Set<number>([0]);
+  const { content, prompt, selection } = params;
+
+  if (selection?.outerHtml) {
+    const exactIndex = content.indexOf(selection.outerHtml);
+    if (exactIndex >= 0) {
+      anchors.add(exactIndex);
+    }
+  }
+
+  const textCandidates = [
+    selection?.textContent || "",
+    ...extractQuotedPromptPhrases(prompt),
+    ...prompt
+      .split(/[^a-z0-9]+/gi)
+      .map((part) => part.trim())
+      .filter((part) => part.length >= 6),
+  ];
+
+  for (const candidate of textCandidates) {
+    const normalizedCandidate = candidate.replace(/\s+/g, " ").trim();
+    if (!normalizedCandidate) {
+      continue;
+    }
+
+    const exactIndex = content.indexOf(normalizedCandidate);
+    if (exactIndex >= 0) {
+      anchors.add(exactIndex);
+      continue;
+    }
+
+    const softPattern = normalizedCandidate
+      .split(/\s+/)
+      .filter((token) => token.length >= 2)
+      .slice(0, 6)
+      .map((token) => escapeRegExp(token))
+      .join("[\\s\\S]{0,80}?");
+
+    if (!softPattern) {
+      continue;
+    }
+
+    const match = content.match(new RegExp(softPattern, "i"));
+    if (match?.index !== undefined) {
+      anchors.add(match.index);
+    }
+  }
+
+  const windows = [...anchors]
+    .slice(0, 4)
+    .map((anchor) => ({
+      start: Math.max(0, anchor - 4_000),
+      end: Math.min(content.length, anchor + 12_000),
+    }))
+    .sort((left, right) => left.start - right.start);
+
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const window of windows) {
+    const previous = merged.at(-1);
+    if (previous && window.start <= previous.end + 400) {
+      previous.end = Math.max(previous.end, window.end);
+      continue;
+    }
+
+    merged.push({ ...window });
+  }
+
+  return merged
+    .map(
+      (window, index) =>
+        `<!-- MYMAKE EXCERPT ${index + 1} FROM ${params.filePath} bytes ${window.start}-${window.end} -->\n${content.slice(window.start, window.end)}`,
+    )
+    .join("\n\n");
 }
 
 function importResolutionCandidates(baseFilePath: string, specifier: string): string[] {
@@ -496,6 +601,7 @@ async function collectContextFiles(
   route: string,
   currentFilePath: string | null | undefined,
   prompt: string,
+  selection: SelectionPayload | null | undefined,
 ): Promise<ContextFile[]> {
   const allFiles = (await listProjectFiles(projectDir)).filter((file) =>
     isTextLikeFile(path.join(projectDir, file)),
@@ -544,24 +650,83 @@ async function collectContextFiles(
       continue;
     }
 
-    currentSize += content.length;
-    if (currentSize > 90_000) {
+    const preparedContent =
+      content.length > MAX_CONTEXT_FILE_CHARS
+        ? buildLargeFileExcerpt({
+            content,
+            filePath: item.file,
+            prompt,
+            selection,
+          })
+        : content;
+
+    const nextSize = currentSize + preparedContent.length;
+    if (nextSize > MAX_CONTEXT_TOTAL_CHARS && contextFiles.length) {
       break;
     }
 
     contextFiles.push({
       path: item.file,
-      content,
+      content: preparedContent,
       reason:
         routeCandidates.has(item.file)
-          ? "current route"
+          ? preparedContent === content
+            ? "current route"
+            : "current route excerpt"
           : currentFilePath === item.file
-            ? "active code editor file"
-            : "supporting source file",
+            ? preparedContent === content
+              ? "active code editor file"
+              : "active code editor excerpt"
+            : preparedContent === content
+              ? "supporting source file"
+              : "supporting source excerpt",
     });
+    currentSize = nextSize;
   }
 
   return contextFiles;
+}
+
+async function applyPatchOperations(
+  projectDir: string,
+  operations: Array<{ path: string; search: string; replace: string; reason?: string }>,
+): Promise<Array<{ path: string; content: string; reason?: string }>> {
+  const fileContents = new Map<string, string>();
+  const changedFiles = new Map<string, { content: string; reason?: string }>();
+
+  for (const operation of operations) {
+    const normalizedPath = toPosixPath(operation.path.trim());
+    if (!normalizedPath) {
+      throw new Error("AI patch did not specify a file path.");
+    }
+
+    const absolutePath = resolveInsideRoot(projectDir, normalizedPath);
+    const currentContent =
+      fileContents.get(normalizedPath) || (await fs.readFile(absolutePath, "utf8"));
+
+    if (!operation.search.trim()) {
+      throw new Error(`AI patch for ${normalizedPath} did not include any source text to replace.`);
+    }
+
+    if (!currentContent.includes(operation.search)) {
+      throw new Error(
+        `AI patch could not be applied to ${normalizedPath} because the expected source text was not found.`,
+      );
+    }
+
+    const nextContent = currentContent.replace(operation.search, operation.replace);
+    fileContents.set(normalizedPath, nextContent);
+    changedFiles.set(normalizedPath, {
+      content: nextContent,
+      reason: operation.reason,
+    });
+  }
+
+  return [...changedFiles.entries()].map(([filePath, item]) => ({
+    path: filePath,
+    content: item.content,
+    reason: item.reason,
+  }));
 }
 
 async function trimOldRevisions(projectId: string): Promise<void> {
@@ -994,25 +1159,64 @@ export async function applyAiEdit(
   );
 
   const route = payload.selection?.route || "/";
+  const activeFileContent =
+    payload.currentFilePath &&
+    isTextLikeFile(path.join(project.extractedPath, payload.currentFilePath))
+      ? await fs.readFile(path.join(project.extractedPath, payload.currentFilePath), "utf8")
+      : null;
   const contextFiles = await collectContextFiles(
     project.extractedPath,
     route,
     payload.currentFilePath,
     payload.prompt,
+    payload.selection,
   );
 
-  const aiResult = await requestAiEdit({
-    aiModelKey: payload.aiModelKey,
-    prompt: payload.prompt,
-    selection: payload.selection,
-    contextFiles,
-    attachments,
-  });
+  const shouldUsePatchMode = Boolean(
+    payload.currentFilePath &&
+      activeFileContent &&
+      activeFileContent.length > LARGE_FILE_EDIT_THRESHOLD,
+  );
 
-  await validateChangedFileImports(project.extractedPath, aiResult.changedFiles);
+  let aiResult:
+    | {
+        summary: string;
+        warnings: string[];
+        changedFiles: Array<{ path: string; content: string; reason?: string }>;
+      }
+    | {
+        summary: string;
+        warnings: string[];
+        operations: Array<{ path: string; search: string; replace: string; reason?: string }>;
+      };
+
+  let changedFiles: Array<{ path: string; content: string; reason?: string }>;
+
+  if (shouldUsePatchMode) {
+    aiResult = await requestAiPatchEdit({
+      aiModelKey: payload.aiModelKey,
+      prompt: payload.prompt,
+      selection: payload.selection,
+      currentFilePath: payload.currentFilePath!,
+      contextFiles,
+      attachments,
+    });
+    changedFiles = await applyPatchOperations(project.extractedPath, aiResult.operations);
+  } else {
+    aiResult = await requestAiEdit({
+      aiModelKey: payload.aiModelKey,
+      prompt: payload.prompt,
+      selection: payload.selection,
+      contextFiles,
+      attachments,
+    });
+    changedFiles = aiResult.changedFiles;
+  }
+
+  await validateChangedFileImports(project.extractedPath, changedFiles);
 
   const changedPaths: string[] = [];
-  for (const change of aiResult.changedFiles) {
+  for (const change of changedFiles) {
     const absolutePath = resolveInsideRoot(project.extractedPath, change.path);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, change.content, "utf8");
@@ -1039,7 +1243,7 @@ export async function applyAiEdit(
   return {
     summary: aiResult.summary,
     warnings: aiResult.warnings,
-    changedFiles: aiResult.changedFiles.map((item) => ({
+    changedFiles: changedFiles.map((item) => ({
       path: item.path,
       reason: item.reason,
     })),
