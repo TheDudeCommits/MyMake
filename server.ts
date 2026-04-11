@@ -35,11 +35,28 @@ const handleUpgrade = app.getUpgradeHandler();
 
 function getProjectIdFromPath(pathname = ""): string | null {
   const parts = pathname.split("/").filter(Boolean);
-  if (parts[0] !== "preview" || !parts[1]) {
+  if (!["preview", "public-preview"].includes(parts[0]) || !parts[1]) {
     return null;
   }
 
   return parts[1];
+}
+
+function isPublicPreviewPath(pathname = ""): boolean {
+  return pathname.split("/").filter(Boolean)[0] === "public-preview";
+}
+
+function isPublicPreviewLocation(value: string | string[] | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = Array.isArray(value) ? value[0] : value;
+  try {
+    return isPublicPreviewPath(new URL(normalized).pathname);
+  } catch {
+    return isPublicPreviewPath(normalized);
+  }
 }
 
 function getProjectIdFromReferer(referer: string | string[] | undefined): string | null {
@@ -228,12 +245,23 @@ function buildPreviewLoadingHtml(projectId: string, state: "starting" | "error")
 
 function rewritePreviewPath(pathname: string, projectId: string): string {
   const prefix = `/preview/${projectId}`;
-  if (pathname === prefix || pathname === `${prefix}/`) {
+  const publicPrefix = `/public-preview/${projectId}`;
+
+  if (
+    pathname === prefix ||
+    pathname === `${prefix}/` ||
+    pathname === publicPrefix ||
+    pathname === `${publicPrefix}/`
+  ) {
     return "/";
   }
 
   if (pathname.startsWith(`${prefix}/`)) {
     return pathname.slice(prefix.length) || "/";
+  }
+
+  if (pathname.startsWith(`${publicPrefix}/`)) {
+    return pathname.slice(publicPrefix.length) || "/";
   }
 
   return pathname;
@@ -454,6 +482,15 @@ app.prepare().then(() => {
 
   server.use("/preview/:projectId", dispatchPreviewProxy);
 
+  server.use("/public-preview/:projectId", async (req, _res, nextFn) => {
+    req.mymakeProjectId = Array.isArray(req.params.projectId)
+      ? req.params.projectId[0]
+      : req.params.projectId;
+    nextFn();
+  });
+
+  server.use("/public-preview/:projectId", dispatchPreviewProxy);
+
   server.use(async (req, res, nextFn) => {
     const refererProjectId = getProjectIdFromReferer(req.headers.referer);
     const fallbackProjectId =
@@ -492,7 +529,9 @@ app.prepare().then(() => {
     }
 
     const sessionValue = getCookieValue(req.headers.cookie, "mymake-session");
-    if (!(await isAuthorizedCookieValue(sessionValue))) {
+    const isPublicRequest =
+      isPublicPreviewPath(req.url || "") || isPublicPreviewLocation(req.headers.referer);
+    if (!isPublicRequest && !(await isAuthorizedCookieValue(sessionValue))) {
       socket.destroy();
       return;
     }

@@ -6,6 +6,7 @@ const EXCLUDED_PREFIXES = [
   "/_next",
   "/favicon.ico",
   "/auth",
+  "/published",
   "/api/auth/login",
 ];
 

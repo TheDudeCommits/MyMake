@@ -2,19 +2,30 @@
 
 import MonacoEditor from "@monaco-editor/react";
 import {
+  Bell,
+  ChevronDown,
   Code2,
+  Clock3,
+  Download,
+  ExternalLink,
   FileCode2,
   FolderKanban,
+  FolderOpen,
+  Grid2x2,
+  House,
   Laptop,
   Loader2,
   LogOut,
   MonitorSmartphone,
   MousePointerSquareDashed,
   Paperclip,
+  Plus,
   RefreshCcw,
   Save,
+  Search,
   SendHorizonal,
   Smartphone,
+  Sparkles,
   Tablet,
   Trash2,
   Undo2,
@@ -47,6 +58,32 @@ const DEVICE_ORDER: DevicePreset[] = ["desktop", "tablet", "mobile"];
 const AI_MODEL_STORAGE_KEY = "mymake-selected-ai-model";
 const EMPTY_REVISIONS: RevisionRecord[] = [];
 const EMPTY_ATTACHMENTS: AttachmentRecord[] = [];
+const HOME_RESOURCE_CARDS = [
+  {
+    title: "Mobile Strategy Review",
+    subtitle: "Recommended from Community",
+    background:
+      "linear-gradient(135deg, rgba(18,19,28,0.98), rgba(72,106,255,0.72) 68%, rgba(132,204,255,0.38))",
+  },
+  {
+    title: "User Journey Map Template",
+    subtitle: "Recommended from Community",
+    background:
+      "linear-gradient(135deg, rgba(72,58,217,0.88), rgba(115,103,255,0.92) 52%, rgba(195,161,255,0.58))",
+  },
+  {
+    title: "Website mockup blueprint",
+    subtitle: "Recommended from Community",
+    background:
+      "linear-gradient(135deg, rgba(246,246,248,0.96), rgba(221,223,229,0.94) 72%, rgba(193,196,205,0.9))",
+  },
+  {
+    title: "Our Blooms Brand Study",
+    subtitle: "Recommended from Community",
+    background:
+      "linear-gradient(135deg, rgba(47,40,62,0.96), rgba(196,127,255,0.72) 50%, rgba(255,218,234,0.7))",
+  },
+] as const;
 
 type SnapshotResponse = DashboardSnapshot & {
   ai?: {
@@ -191,6 +228,70 @@ function projectOptionLabel(project: ProjectRecord, duplicateNames: Map<string, 
   }
 
   return `${project.name} · ${project.id.slice(-4)}`;
+}
+
+function projectMonogram(projectName: string): string {
+  const normalized = projectName
+    .replace(/\.[a-z0-9]+$/i, "")
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((part) => part[0]?.toUpperCase() || "")
+    .join("");
+
+  return normalized || "MM";
+}
+
+function projectCardBackground(project: ProjectRecord): string {
+  const seed = Array.from(project.id).reduce(
+    (total, character, index) => total + character.charCodeAt(0) * (index + 7),
+    0,
+  );
+  const hue = seed % 360;
+  const hueAlt = (hue + 48) % 360;
+
+  return `radial-gradient(circle at 18% 16%, hsla(${hue}, 90%, 72%, 0.28), transparent 28%), radial-gradient(circle at 84% 78%, hsla(${hueAlt}, 90%, 72%, 0.22), transparent 24%), linear-gradient(180deg, rgba(22,24,30,0.96) 0%, rgba(18,19,24,0.98) 100%)`;
+}
+
+function relativeProjectTime(value: string): string {
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) {
+    return "Updated recently";
+  }
+
+  const minutes = Math.max(1, Math.round((Date.now() - timestamp) / 60000));
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+
+  const days = Math.round(hours / 24);
+  if (days < 7) {
+    return `${days}d ago`;
+  }
+
+  const weeks = Math.round(days / 7);
+  return `${weeks}w ago`;
+}
+
+function projectStatusText(status: ProjectRecord["status"]): string {
+  if (status === "ready") {
+    return "Ready";
+  }
+
+  if (status === "installing") {
+    return "Building";
+  }
+
+  if (status === "unsupported") {
+    return "Unsupported";
+  }
+
+  return "Needs attention";
 }
 
 function iconTitle(label: string, disabled?: boolean): string | undefined {
@@ -377,6 +478,278 @@ function ChevronSmall({ open }: { open: boolean }) {
   );
 }
 
+function UserBadgeButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      className="group relative grid h-8 w-8 place-items-center rounded-full bg-[#6675a0] text-white transition hover:bg-[#7787b6]"
+      type="button"
+      title="Sign out"
+      aria-label="Sign out"
+      onClick={onClick}
+    >
+      <span className="text-[12px] font-semibold transition group-hover:opacity-0">A</span>
+      <LogOut className="absolute h-4 w-4 opacity-0 transition group-hover:opacity-100" />
+    </button>
+  );
+}
+
+function HomeProjectCard({
+  project,
+  label,
+  onDelete,
+  onOpen,
+}: {
+  project: ProjectRecord;
+  label: string;
+  onDelete: (project: ProjectRecord) => void;
+  onOpen: (projectId: string) => void;
+}) {
+  return (
+    <article className="group relative overflow-hidden rounded-[24px] border border-white/[0.08] bg-[#2a2b2f] text-left transition hover:border-white/[0.16] hover:bg-[#2d2e33]">
+      <button
+        className="block w-full text-left"
+        type="button"
+        onClick={() => onOpen(project.id)}
+      >
+        <div
+          className="relative h-[214px] overflow-hidden rounded-[22px] rounded-b-[12px] border-b border-white/[0.06] p-5"
+          style={{ background: projectCardBackground(project) }}
+        >
+          <div className="absolute inset-0 opacity-60" />
+          <div className="relative flex h-full flex-col justify-between">
+            <div className="flex items-start justify-between gap-3">
+              <span className="rounded-full border border-white/[0.12] bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.18em] text-white/72">
+                {projectStatusText(project.status)}
+              </span>
+            </div>
+
+            <div className="space-y-3">
+              <div className="inline-flex h-12 min-w-[72px] items-center justify-center rounded-[16px] border border-white/[0.08] bg-black/22 px-4 text-[28px] font-semibold tracking-[-0.06em] text-white/92">
+                {projectMonogram(label)}
+              </div>
+              <div className="max-w-[78%] text-[30px] font-semibold leading-none tracking-[-0.06em] text-white">
+                {label}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center justify-between gap-4 px-4 py-4">
+          <div className="min-w-0">
+            <p className="truncate text-[15px] font-medium text-white">{label}</p>
+            <p className="mt-1 text-sm text-slate-400">Edited {relativeProjectTime(project.lastOpenedAt)}</p>
+          </div>
+          <ExternalLink className="h-4 w-4 shrink-0 text-slate-500 transition group-hover:text-slate-200" />
+        </div>
+      </button>
+      <button
+        className="absolute right-4 top-4 z-10 grid h-8 w-8 place-items-center rounded-full bg-black/28 text-white/72 opacity-0 transition hover:bg-black/42 hover:text-white group-hover:opacity-100"
+        type="button"
+        title={`Delete ${label}`}
+        aria-label={`Delete ${label}`}
+        onClick={() => onDelete(project)}
+      >
+        <Trash2 className="h-4 w-4" />
+      </button>
+    </article>
+  );
+}
+
+function HomeDashboard({
+  feedback,
+  error,
+  filteredProjects,
+  homeQuery,
+  onDeleteProject,
+  onLogout,
+  onOpenProject,
+  onProjectUpload,
+  onSearchChange,
+  onUploadClick,
+  projectNameCounts,
+  totalProjects,
+}: {
+  feedback: string | null;
+  error: string | null;
+  filteredProjects: ProjectRecord[];
+  homeQuery: string;
+  onDeleteProject: (project: ProjectRecord) => void;
+  onLogout: () => void;
+  onOpenProject: (projectId: string) => void;
+  onProjectUpload: () => void;
+  onSearchChange: (value: string) => void;
+  onUploadClick: () => void;
+  projectNameCounts: Map<string, number>;
+  totalProjects: number;
+}) {
+  return (
+    <main className="h-screen overflow-hidden bg-[#2b2c30] text-[#f3f4f8]">
+      <div className="grid h-full grid-cols-[220px_minmax(0,1fr)]">
+        <aside className="flex min-h-0 flex-col border-r border-white/[0.08] bg-[#242528] px-3 pb-4 pt-3">
+          <div className="flex items-center justify-between gap-3 px-2">
+            <div className="flex min-w-0 items-center gap-3">
+              <UserBadgeButton onClick={onLogout} />
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-white">amirhor98</p>
+                <p className="text-xs text-slate-400">Personal workspace</p>
+              </div>
+            </div>
+            <Bell className="h-4 w-4 shrink-0 text-slate-500" />
+          </div>
+
+          <div className="mt-4">
+            <label className="relative block">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+              <input
+                className="h-10 w-full rounded-[12px] border border-white/[0.06] bg-[#2c2d31] pl-9 pr-3 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-white/[0.14]"
+                placeholder="Search projects"
+                value={homeQuery}
+                onChange={(event) => onSearchChange(event.target.value)}
+              />
+            </label>
+          </div>
+
+          <nav className="mt-5 space-y-1.5">
+            <button className="flex h-10 w-full items-center gap-3 rounded-[12px] bg-[#4b5681] px-3 text-sm font-medium text-white" type="button">
+              <Clock3 className="h-4 w-4" />
+              Recents
+            </button>
+            <button className="flex h-10 w-full items-center gap-3 rounded-[12px] px-3 text-sm text-slate-300 transition hover:bg-white/[0.04] hover:text-white" type="button">
+              <Grid2x2 className="h-4 w-4" />
+              All projects
+            </button>
+            <button
+              className="flex h-10 w-full items-center gap-3 rounded-[12px] px-3 text-sm text-slate-300 transition hover:bg-white/[0.04] hover:text-white"
+              type="button"
+              onClick={onProjectUpload}
+            >
+              <FolderOpen className="h-4 w-4" />
+              Uploads
+            </button>
+          </nav>
+
+          <button
+            className="mt-6 inline-flex h-10 items-center justify-center gap-2 rounded-[12px] bg-[#5f62ff] px-4 text-sm font-medium text-white transition hover:bg-[#7174ff]"
+            type="button"
+            onClick={onUploadClick}
+          >
+            <Plus className="h-4 w-4" />
+            Upload project zip
+          </button>
+
+          {(feedback || error) ? (
+            <div
+              className={clsx(
+                "mt-4 rounded-[16px] border px-3 py-3 text-sm leading-6",
+                error
+                  ? "border-rose-300/15 bg-rose-300/10 text-rose-100"
+                  : "border-emerald-300/15 bg-emerald-300/10 text-emerald-100",
+              )}
+            >
+              {error || feedback}
+            </div>
+          ) : null}
+
+          <div className="mt-auto rounded-[16px] border border-white/[0.06] bg-[#2b2c31] px-3 py-3 text-sm leading-6 text-slate-400">
+            Manage uploads, open any project, and remove the ones you no longer need from the recents grid.
+          </div>
+        </aside>
+
+        <section className="min-w-0 overflow-y-auto px-7 pb-8 pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {["Design", "FigJam", "Slides", "Site", "Make"].map((item, index) => (
+                <span
+                  key={item}
+                  className={clsx(
+                    "rounded-full border px-3.5 py-1.5 text-sm",
+                    index === 4
+                      ? "border-[#5f62ff]/26 bg-[#5f62ff]/12 text-white"
+                      : "border-white/[0.08] bg-[#2f3034] text-slate-300",
+                  )}
+                >
+                  {item}
+                </span>
+              ))}
+            </div>
+            <button
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-[12px] border border-white/[0.08] bg-[#2f3034] px-4 text-sm font-medium text-white transition hover:bg-[#34363b]"
+              type="button"
+              onClick={onUploadClick}
+            >
+              <Plus className="h-4 w-4" />
+              New upload
+            </button>
+          </div>
+
+          <div className="mt-5 rounded-[24px] border border-white/[0.08] bg-[#313236] p-4">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-base font-medium text-white">Recommended resources from Community</p>
+                <p className="mt-1 text-sm text-slate-400">A Figma-style home surface for opening and organizing your projects.</p>
+              </div>
+              <Sparkles className="h-4 w-4 text-slate-400" />
+            </div>
+            <div className="grid gap-4 xl:grid-cols-4 md:grid-cols-2">
+              {HOME_RESOURCE_CARDS.map((card) => (
+                <div
+                  key={card.title}
+                  className="overflow-hidden rounded-[18px] border border-white/[0.08] bg-[#2a2b2f]"
+                >
+                  <div className="h-[146px] border-b border-white/[0.06]" style={{ background: card.background }} />
+                  <div className="p-3">
+                    <p className="text-sm font-medium text-white">{card.title}</p>
+                    <p className="mt-1 text-xs text-slate-400">{card.subtitle}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-7 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-lg font-medium text-white">Recently viewed</p>
+              <p className="mt-1 text-sm text-slate-400">
+                {filteredProjects.length === totalProjects
+                  ? `${totalProjects} uploaded project${totalProjects === 1 ? "" : "s"}`
+                  : `${filteredProjects.length} of ${totalProjects} projects`}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-sm text-slate-400">
+              <span className="rounded-full border border-white/[0.08] bg-[#2f3034] px-3 py-1.5">
+                All files
+              </span>
+              <span className="rounded-full border border-white/[0.08] bg-[#2f3034] px-3 py-1.5">
+                Last viewed
+              </span>
+            </div>
+          </div>
+
+          {filteredProjects.length ? (
+            <div className="mt-4 grid gap-5 xl:grid-cols-3 md:grid-cols-2">
+              {filteredProjects.map((project) => (
+                <HomeProjectCard
+                  key={project.id}
+                  project={project}
+                  label={projectOptionLabel(project, projectNameCounts)}
+                  onDelete={onDeleteProject}
+                  onOpen={onOpenProject}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="mt-4 rounded-[24px] border border-dashed border-white/[0.08] bg-[#2f3034] px-6 py-12 text-center">
+              <p className="text-lg font-medium text-white">No matching projects yet</p>
+              <p className="mt-2 text-sm leading-7 text-slate-400">
+                Upload a zip to start a new project, or clear the search to see everything you already imported.
+              </p>
+            </div>
+          )}
+        </section>
+      </div>
+    </main>
+  );
+}
+
 export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSnapshot }) {
   const [snapshot, setSnapshot] = useState(initialSnapshot);
   const [devicePreset, setDevicePreset] = useState<DevicePreset>("desktop");
@@ -401,6 +774,8 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const [isSaving, setIsSaving] = useState(false);
   const [isRunningAi, setIsRunningAi] = useState(false);
   const [isUploadingAttachments, setIsUploadingAttachments] = useState(false);
+  const [homeQuery, setHomeQuery] = useState("");
+  const [isShareMenuOpen, setIsShareMenuOpen] = useState(false);
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([]);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -411,6 +786,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const leftRailScrollRef = useRef<HTMLDivElement>(null);
   const projectUploadInputRef = useRef<HTMLInputElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const shareMenuRef = useRef<HTMLDivElement>(null);
   const previousPreviewIdentityRef = useRef<string | null>(null);
   const previousRevisionIdRef = useRef<string | null>(null);
 
@@ -466,6 +842,16 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     });
     return counts;
   }, [snapshot.projects]);
+  const filteredProjects = useMemo(() => {
+    const query = homeQuery.trim().toLowerCase();
+    if (!query) {
+      return snapshot.projects;
+    }
+
+    return snapshot.projects.filter((project) =>
+      projectOptionLabel(project, projectNameCounts).toLowerCase().includes(query),
+    );
+  }, [homeQuery, projectNameCounts, snapshot.projects]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -511,6 +897,10 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   }, [currentProject?.project.id]);
 
   useEffect(() => {
+    setIsShareMenuOpen(false);
+  }, [currentProject?.project.id]);
+
+  useEffect(() => {
     const rail = leftRailScrollRef.current;
     if (!rail) {
       return;
@@ -518,6 +908,21 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     rail.scrollTop = rail.scrollHeight;
   }, [currentProject?.project.id, currentProject?.project.currentRevisionId, orderedRevisions.length]);
+
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      if (
+        shareMenuRef.current &&
+        event.target instanceof Node &&
+        !shareMenuRef.current.contains(event.target)
+      ) {
+        setIsShareMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("mousedown", handlePointerDown);
+    return () => window.removeEventListener("mousedown", handlePointerDown);
+  }, []);
 
   useEffect(() => {
     if (!previewIdentity) {
@@ -624,8 +1029,20 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     return payload;
   }
 
+  function syncBrowserLocation(projectId: string | null) {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const nextPath = projectId ? `/?projectId=${encodeURIComponent(projectId)}` : "/";
+    if (`${window.location.pathname}${window.location.search}` !== nextPath) {
+      window.history.replaceState({}, "", nextPath);
+    }
+  }
+
   function applySnapshot(nextSnapshot: SnapshotResponse) {
     setSnapshot(nextSnapshot);
+    syncBrowserLocation(nextSnapshot.currentProjectId);
     setError(null);
     if (nextSnapshot.ai?.summary) {
       setFeedback(nextSnapshot.ai.summary);
@@ -678,13 +1095,14 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     }
   }
 
-  async function handleDeleteProject() {
-    if (!currentProject) {
+  async function handleDeleteProject(project?: ProjectRecord) {
+    const targetProject = project || currentProject?.project;
+    if (!targetProject) {
       return;
     }
 
     const confirmed = window.confirm(
-      `Remove "${currentProject.project.name}" from MyMake? This deletes its uploaded files, checkpoints, and attachments.`,
+      `Remove "${targetProject.name}" from MyMake? This deletes its uploaded files, checkpoints, and attachments.`,
     );
     if (!confirmed) {
       return;
@@ -692,8 +1110,8 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     try {
       setError(null);
-      setFeedback(`Removing ${currentProject.project.name}...`);
-      const response = await fetch(`/api/projects/${currentProject.project.id}`, {
+      setFeedback(`Removing ${targetProject.name}...`);
+      const response = await fetch(`/api/projects/${targetProject.id}`, {
         method: "DELETE",
       });
       const data = await readJsonResponse<SnapshotResponse>(response);
@@ -703,7 +1121,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       setIsCodePanelOpen(false);
       setSelectedElement(null);
       setSelectedAttachmentIds([]);
-      setFeedback(`Removed ${currentProject.project.name}.`);
+      setFeedback(`Removed ${targetProject.name}.`);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Could not remove the project.");
     }
@@ -898,25 +1316,51 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     window.location.href = "/auth";
   }
 
-  async function handleShare() {
-    try {
-      await navigator.clipboard.writeText(window.location.href);
-      setFeedback("Copied the current MyMake URL to your clipboard.");
-    } catch {
-      setError("Could not copy the share link.");
-    }
+  function goHome() {
+    setSnapshot((previous) => ({
+      ...previous,
+      currentProjectId: null,
+      currentProject: null,
+    }));
+    setPrompt("");
+    setSelectedElement(null);
+    setSelectedAttachmentIds([]);
+    setIsPicking(false);
+    setIsCodePanelOpen(false);
+    setIsShareMenuOpen(false);
+    setFeedback(null);
+    setError(null);
+    syncBrowserLocation(null);
   }
 
-  function handlePublish() {
+  async function handleCopyPublishedLink() {
     if (!currentProject) {
       return;
     }
 
-    window.open(
-      `/api/projects/${currentProject.project.id}/export`,
-      "_blank",
-      "noopener,noreferrer",
-    );
+    const shareUrl = new URL(
+      `/published/${currentProject.project.id}`,
+      window.location.origin,
+    ).toString();
+    setIsShareMenuOpen(false);
+
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setFeedback("Copied the published full-screen link and opened it in a new tab.");
+    } catch {
+      setFeedback("Opened the published full-screen link in a new tab.");
+    }
+
+    window.open(shareUrl, "_blank", "noopener,noreferrer");
+  }
+
+  function handleExportProject() {
+    if (!currentProject) {
+      return;
+    }
+
+    setIsShareMenuOpen(false);
+    window.open(`/api/projects/${currentProject.project.id}/export`, "_blank", "noopener,noreferrer");
     setFeedback("Preparing the current code snapshot for download.");
   }
 
@@ -949,12 +1393,65 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   );
   const composerNotice = error || feedback;
   const showPreviewOverlay = Boolean(currentProject && (!isPreviewFrameReady || isPreviewStarting));
+  const sharedInputs = (
+    <>
+      <input
+        ref={projectUploadInputRef}
+        hidden
+        accept=".zip"
+        type="file"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) {
+            void handleProjectUpload(file);
+          }
+          event.target.value = "";
+        }}
+      />
+
+      <input
+        ref={attachmentInputRef}
+        hidden
+        multiple
+        type="file"
+        onChange={(event) => {
+          void handleAttachmentUpload(event.target.files);
+          event.target.value = "";
+        }}
+      />
+    </>
+  );
+
+  if (!currentProject) {
+    return (
+      <>
+        <HomeDashboard
+          feedback={feedback}
+          error={error}
+          filteredProjects={filteredProjects}
+          homeQuery={homeQuery}
+          onDeleteProject={(project) => void handleDeleteProject(project)}
+          onLogout={() => void handleLogout()}
+          onOpenProject={(projectId) => void handleProjectChange(projectId)}
+          onProjectUpload={() => projectUploadInputRef.current?.click()}
+          onSearchChange={setHomeQuery}
+          onUploadClick={() => projectUploadInputRef.current?.click()}
+          projectNameCounts={projectNameCounts}
+          totalProjects={snapshot.projects.length}
+        />
+        {sharedInputs}
+      </>
+    );
+  }
 
   return (
     <main className="h-screen overflow-hidden bg-[#1f2023] text-[#f2f2f4]">
       <div className="flex h-full flex-col">
         <header className="grid h-[60px] shrink-0 grid-cols-[336px_minmax(0,1fr)] border-b border-white/[0.08] bg-[#242528]">
           <div className="flex min-w-0 items-center gap-2 border-r border-white/[0.08] px-3">
+            <ToolbarIconButton label="Go to home" onClick={goHome}>
+              <House className="h-4 w-4" />
+            </ToolbarIconButton>
             <ToolbarIconButton
               label={isUploading ? "Uploading project" : "Upload project zip"}
               onClick={() => projectUploadInputRef.current?.click()}
@@ -988,17 +1485,8 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
               </div>
             </div>
 
-            {currentProject ? (
-              <ToolbarIconButton
-                label="Delete current project"
-                onClick={() => void handleDeleteProject()}
-              >
-                <Trash2 className="h-4 w-4" />
-              </ToolbarIconButton>
-            ) : null}
-
             <span className="text-sm font-medium text-slate-300">
-              {currentProject ? currentCheckpointLabel : "No checkpoint"}
+              {currentCheckpointLabel}
             </span>
           </div>
 
@@ -1032,9 +1520,6 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
             </ToolbarIconButton>
 
             <div className="ml-auto flex items-center gap-2">
-              <div className="grid h-7 w-7 place-items-center rounded-full bg-[#6675a0] text-[12px] font-semibold text-white">
-                A
-              </div>
               <ToolbarIconButton
                 label={isCodePanelOpen ? "Close code panel" : "Open code panel"}
                 active={isCodePanelOpen}
@@ -1042,24 +1527,48 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
               >
                 <Code2 className="h-4 w-4" />
               </ToolbarIconButton>
-              <ToolbarIconButton label="Sign out" onClick={handleLogout}>
-                <LogOut className="h-4 w-4" />
-              </ToolbarIconButton>
-              <button
-                className="h-9 rounded-[12px] border border-white/[0.1] bg-[#2a2b2f] px-4 text-sm font-medium text-slate-100 transition hover:bg-[#303238] disabled:cursor-not-allowed disabled:opacity-50"
-                type="button"
-                disabled={!currentProject}
-                onClick={handlePublish}
-              >
-                Make a copy
-              </button>
-              <button
-                className="h-9 rounded-[12px] bg-[#5f62ff] px-4 text-sm font-medium text-white transition hover:bg-[#6d70ff]"
-                type="button"
-                onClick={() => void handleShare()}
-              >
-                Share
-              </button>
+              <div ref={shareMenuRef} className="relative">
+                <button
+                  className="inline-flex h-9 items-center gap-2 rounded-[12px] bg-[#5f62ff] px-4 text-sm font-medium text-white transition hover:bg-[#6d70ff]"
+                  type="button"
+                  onClick={() => setIsShareMenuOpen((value) => !value)}
+                >
+                  Share
+                  <ChevronDown className="h-4 w-4" />
+                </button>
+
+                {isShareMenuOpen ? (
+                  <div className="absolute right-0 top-[calc(100%+10px)] z-50 w-[260px] rounded-[18px] border border-white/[0.08] bg-[#2a2b2f] p-2 shadow-[0_28px_64px_rgba(0,0,0,0.38)]">
+                    <button
+                      className="flex w-full items-start gap-3 rounded-[14px] px-3 py-3 text-left transition hover:bg-white/[0.04]"
+                      type="button"
+                      onClick={() => void handleCopyPublishedLink()}
+                    >
+                      <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-slate-300" />
+                      <div>
+                        <p className="text-sm font-medium text-white">Publish</p>
+                        <p className="mt-1 text-xs leading-5 text-slate-400">
+                          Open and copy a full-screen link to share this UI with other people.
+                        </p>
+                      </div>
+                    </button>
+                    <button
+                      className="flex w-full items-start gap-3 rounded-[14px] px-3 py-3 text-left transition hover:bg-white/[0.04]"
+                      type="button"
+                      onClick={handleExportProject}
+                    >
+                      <Download className="mt-0.5 h-4 w-4 shrink-0 text-slate-300" />
+                      <div>
+                        <p className="text-sm font-medium text-white">Export</p>
+                        <p className="mt-1 text-xs leading-5 text-slate-400">
+                          Download the current checkpoint as a project zip.
+                        </p>
+                      </div>
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+              <UserBadgeButton onClick={() => void handleLogout()} />
             </div>
           </div>
         </header>
@@ -1527,30 +2036,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
         </div>
       </div>
 
-      <input
-        ref={projectUploadInputRef}
-        hidden
-        accept=".zip"
-        type="file"
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) {
-            void handleProjectUpload(file);
-          }
-          event.target.value = "";
-        }}
-      />
-
-      <input
-        ref={attachmentInputRef}
-        hidden
-        multiple
-        type="file"
-        onChange={(event) => {
-          void handleAttachmentUpload(event.target.files);
-          event.target.value = "";
-        }}
-      />
+      {sharedInputs}
     </main>
   );
 }
