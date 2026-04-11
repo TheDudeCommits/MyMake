@@ -577,7 +577,11 @@ export async function getDashboardSnapshot(
   selectedProjectId?: string | null,
 ): Promise<DashboardSnapshot> {
   const projects = await listProjects();
-  const currentProjectId = selectedProjectId || projects[0]?.id || null;
+  const currentProjectId =
+    selectedProjectId ||
+    projects.find((project) => project.status !== "error")?.id ||
+    projects[0]?.id ||
+    null;
 
   return {
     projects,
