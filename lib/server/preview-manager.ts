@@ -199,6 +199,10 @@ function markRunnerReady(runner: PreviewRunnerState): void {
     .run(runner.port, "ready", new Date().toISOString(), runner.projectId);
 }
 
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
 async function prunePreviewRunners(preferredProjectId: string): Promise<void> {
   const runtime = getRuntimeState();
   const now = Date.now();
@@ -304,14 +308,17 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
 
     runtime.runners.set(projectId, runner);
     touchRunner(runner);
+    let stdoutBuffer = "";
 
     child.stdout?.on("data", (chunk) => {
       const text = String(chunk);
       process.stdout.write(`[preview:${projectId}] ${text}`);
+      stdoutBuffer = `${stdoutBuffer}${stripAnsi(text)}`.slice(-8_000);
       if (
-        text.includes(`127.0.0.1:${port}`) ||
-        text.includes("Preview runner ready") ||
-        text.includes("ready in")
+        stdoutBuffer.includes(`http://127.0.0.1:${port}/`) ||
+        stdoutBuffer.includes(`http://127.0.0.1:${port}`) ||
+        stdoutBuffer.includes("Preview runner ready") ||
+        /ready in\s+\d+/i.test(stdoutBuffer)
       ) {
         markRunnerReady(runner);
       }
