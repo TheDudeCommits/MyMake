@@ -506,33 +506,47 @@ function HomeProjectCard({
 }) {
   return (
     <article className="group relative overflow-hidden rounded-[24px] border border-white/[0.08] bg-[#2a2b2f] text-left transition hover:border-white/[0.16] hover:bg-[#2d2e33]">
+      <div
+        className="relative h-[214px] overflow-hidden rounded-[22px] rounded-b-[12px] border-b border-white/[0.06] p-5"
+        style={{ background: projectCardBackground(project) }}
+      >
+        <div className="absolute inset-0 opacity-60" />
+        <div className="relative z-10 flex items-start justify-between gap-3">
+          <span className="rounded-full border border-white/[0.12] bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.18em] text-white/72">
+            {projectStatusText(project.status)}
+          </span>
+          <button
+            className="grid h-8 w-8 place-items-center rounded-full bg-black/24 text-white/68 opacity-70 transition hover:bg-black/40 hover:text-white group-hover:opacity-100"
+            type="button"
+            title={`Delete ${label}`}
+            aria-label={`Delete ${label}`}
+            onClick={() => onDelete(project)}
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </div>
+
+        <button
+          className="relative z-10 mt-6 flex h-[calc(100%-56px)] w-full flex-col justify-end text-left"
+          type="button"
+          onClick={() => onOpen(project.id)}
+        >
+          <div className="space-y-3">
+            <div className="inline-flex h-12 min-w-[72px] items-center justify-center rounded-[16px] border border-white/[0.08] bg-black/22 px-4 text-[28px] font-semibold tracking-[-0.06em] text-white/92">
+              {projectMonogram(label)}
+            </div>
+            <div className="max-w-[78%] text-[30px] font-semibold leading-none tracking-[-0.06em] text-white">
+              {label}
+            </div>
+          </div>
+        </button>
+      </div>
+
       <button
         className="block w-full text-left"
         type="button"
         onClick={() => onOpen(project.id)}
       >
-        <div
-          className="relative h-[214px] overflow-hidden rounded-[22px] rounded-b-[12px] border-b border-white/[0.06] p-5"
-          style={{ background: projectCardBackground(project) }}
-        >
-          <div className="absolute inset-0 opacity-60" />
-          <div className="relative flex h-full flex-col justify-between">
-            <div className="flex items-start justify-between gap-3">
-              <span className="rounded-full border border-white/[0.12] bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.18em] text-white/72">
-                {projectStatusText(project.status)}
-              </span>
-            </div>
-
-            <div className="space-y-3">
-              <div className="inline-flex h-12 min-w-[72px] items-center justify-center rounded-[16px] border border-white/[0.08] bg-black/22 px-4 text-[28px] font-semibold tracking-[-0.06em] text-white/92">
-                {projectMonogram(label)}
-              </div>
-              <div className="max-w-[78%] text-[30px] font-semibold leading-none tracking-[-0.06em] text-white">
-                {label}
-              </div>
-            </div>
-          </div>
-        </div>
         <div className="flex items-center justify-between gap-4 px-4 py-4">
           <div className="min-w-0">
             <p className="truncate text-[15px] font-medium text-white">{label}</p>
@@ -540,23 +554,6 @@ function HomeProjectCard({
           </div>
           <ExternalLink className="h-4 w-4 shrink-0 text-slate-500 transition group-hover:text-slate-200" />
         </div>
-      </button>
-      <button
-        className="absolute right-4 top-4 z-10 grid h-8 w-8 place-items-center rounded-full bg-black/28 text-white/72 opacity-0 transition hover:bg-black/42 hover:text-white group-hover:opacity-100"
-        type="button"
-        title={`Delete ${label}`}
-        aria-label={`Delete ${label}`}
-        onMouseDown={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-        }}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onDelete(project);
-        }}
-      >
-        <Trash2 className="h-4 w-4" />
       </button>
     </article>
   );
