@@ -25,20 +25,24 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AiModelKey,
+  AiModelOption,
   AttachmentRecord,
   DashboardSnapshot,
   DevicePreset,
   FileNode,
   ProjectWorkspace,
+  RevisionRecord,
   SelectionPayload,
 } from "@/lib/types";
 
-const DEVICE_PRESETS: Record<DevicePreset, { label: string; width: string; icon: typeof Laptop }> =
-  {
-    desktop: { label: "Desktop", width: "1080px", icon: Laptop },
-    tablet: { label: "Tablet", width: "840px", icon: Tablet },
-    mobile: { label: "Mobile", width: "402px", icon: Smartphone },
-  };
+const DEVICE_PRESETS: Record<
+  DevicePreset,
+  { label: string; width: string; maxWidth: string; icon: typeof Laptop }
+> = {
+  desktop: { label: "Desktop", width: "100%", maxWidth: "none", icon: Laptop },
+  tablet: { label: "Tablet", width: "920px", maxWidth: "100%", icon: Tablet },
+  mobile: { label: "Mobile", width: "430px", maxWidth: "100%", icon: Smartphone },
+};
 
 const DEVICE_ORDER: DevicePreset[] = ["desktop", "tablet", "mobile"];
 const AI_MODEL_STORAGE_KEY = "mymake-selected-ai-model";
@@ -112,6 +116,26 @@ function routeLabel(route: string) {
   }
 
   return route.replace(/^\/+/, "") || "home";
+}
+
+function shortAiModelLabel(model: AiModelOption): string {
+  if (model.key === "openai-chatgpt-5-2") {
+    return "GPT 5.2";
+  }
+
+  if (model.key === "anthropic-sonnet-4-6") {
+    return "Sonnet 4.6";
+  }
+
+  return model.label;
+}
+
+function describeRevision(revision: RevisionRecord | null | undefined): string {
+  if (!revision) {
+    return "No saved revisions yet.";
+  }
+
+  return revision.summary || `${revision.label} saved from ${revision.source}.`;
 }
 
 function StatusPill({ status }: { status: ProjectWorkspace["project"]["status"] }) {
@@ -318,7 +342,6 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const revisions = currentProject?.revisions || [];
   const attachments = currentProject?.attachments || [];
   const currentDevice = DEVICE_PRESETS[devicePreset];
-  const previewWidth = currentDevice.width;
   const displayRoute = routeLabel(currentRoute);
   const hasUnsavedEdits = Boolean(editorFilePath && editorContent !== editorBaselineContent);
   const enabledAiModels = useMemo(
@@ -706,6 +729,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       selectedAiModel?.enabled,
   );
   const composerNotice = error || feedback;
+  const latestRevision = revisions[0] || null;
 
   const reasoningBullets = useMemo(() => {
     if (!currentProject) {
@@ -727,7 +751,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   return (
     <main className="h-screen overflow-hidden bg-[#1f2023] text-[#f2f2f4]">
       <div className="flex h-full flex-col">
-        <header className="grid h-[60px] shrink-0 grid-cols-[272px_minmax(0,1fr)] border-b border-white/[0.08] bg-[#242528]">
+        <header className="grid h-[60px] shrink-0 grid-cols-[336px_minmax(0,1fr)] border-b border-white/[0.08] bg-[#242528]">
           <div className="flex min-w-0 items-center gap-2 border-r border-white/[0.08] px-3">
             <ToolbarIconButton onClick={() => projectUploadInputRef.current?.click()}>
               {isUploading ? (
@@ -828,10 +852,10 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           </div>
         </header>
 
-        <div className="grid min-h-0 flex-1 grid-cols-[272px_minmax(0,1fr)]">
+        <div className="grid min-h-0 flex-1 grid-cols-[336px_minmax(0,1fr)]">
           <aside className="flex min-h-0 flex-col border-r border-white/[0.08] bg-[#2b2928]">
             <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4">
-              <div className="space-y-5">
+              <div className="space-y-4">
                 <div>
                   <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.24em] text-slate-500">
                     <Sparkles className="h-3.5 w-3.5" />
@@ -847,17 +871,36 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   </div>
                 </div>
 
-                {selectedElement ? (
-                  <div className="rounded-[16px] border border-white/[0.08] bg-[#2f2d2c] px-3.5 py-3">
+                <div className="rounded-[16px] border border-white/[0.08] bg-[#2f2d2c] px-3.5 py-3">
+                  <div className="flex items-center justify-between gap-3">
                     <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Selected element</p>
-                    <p className="mt-2 text-sm font-medium text-slate-100">
-                      {selectedElement.tagName.toLowerCase()} on {selectedElement.route}
-                    </p>
-                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
-                      {selectedElement.textContent || selectedElement.domPath}
-                    </p>
+                    {selectedElement ? (
+                      <span className="rounded-full border border-[#5f62ff]/30 bg-[#5f62ff]/12 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-100">
+                        targeting
+                      </span>
+                    ) : null}
                   </div>
-                ) : null}
+                  <p className="mt-2 text-sm font-medium text-slate-100">
+                    {selectedElement
+                      ? `${selectedElement.tagName.toLowerCase()} on ${selectedElement.route}`
+                      : "No layer selected yet"}
+                  </p>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
+                    {selectedElement?.textContent ||
+                      selectedElement?.domPath ||
+                      "Turn on the picker, hover the preview, and click the exact layer you want to edit."}
+                  </p>
+                </div>
+
+                <div className="rounded-[16px] border border-white/[0.08] bg-[#2f2d2c] px-3.5 py-3">
+                  <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Revision activity</p>
+                  <p className="mt-2 text-sm font-medium text-slate-100">
+                    {latestRevision ? latestRevision.label : "Waiting for first saved revision"}
+                  </p>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
+                    {describeRevision(latestRevision)}
+                  </p>
+                </div>
 
                 <div className="rounded-[16px] border border-white/[0.08] bg-[#2f2d2c] p-3.5">
                   <div className="flex items-start justify-between gap-3">
@@ -941,7 +984,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
               <div className="rounded-[18px] border border-white/[0.08] bg-[#2d2d2f] p-2.5">
                 <textarea
-                  className="h-[86px] w-full resize-none rounded-[14px] border border-white/[0.08] bg-[#262628] px-3.5 py-3 text-sm leading-6 text-white outline-none transition placeholder:text-slate-500 focus:border-white/[0.18]"
+                  className="h-[76px] w-full resize-none rounded-[14px] border border-white/[0.08] bg-[#262628] px-3.5 py-3 text-sm leading-6 text-white outline-none transition placeholder:text-slate-500 focus:border-white/[0.18]"
                   placeholder="Ask for changes"
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
@@ -953,7 +996,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   }}
                 />
 
-                <div className="mt-2 flex items-center justify-between gap-2">
+                <div className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2">
                   <div className="flex items-center gap-1.5">
                     <RailIconButton onClick={() => projectUploadInputRef.current?.click()}>
                       <Upload className="h-3.5 w-3.5" />
@@ -970,18 +1013,21 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                     </RailIconButton>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex min-w-0 items-center justify-end gap-2">
                     <div className="relative">
                       <select
-                        className="h-8 appearance-none rounded-full border border-white/[0.08] bg-[#262628] px-3 pr-8 text-[11px] text-slate-300 outline-none transition hover:bg-[#303238]"
+                        className="h-8 w-[118px] appearance-none rounded-full border border-white/[0.08] bg-[#262628] px-3 pr-8 text-[11px] text-slate-300 outline-none transition hover:bg-[#303238]"
                         value={selectedAiModel?.key || fallbackAiModelKey}
                         onChange={(event) =>
                           setSelectedAiModelKey(event.target.value as AiModelKey)
                         }
+                        title={selectedAiModel?.label || ""}
                       >
                         {snapshot.aiModels.map((model) => (
                           <option key={model.key} value={model.key} disabled={!model.enabled}>
-                            {model.enabled ? model.label : `${model.label} (Needs key)`}
+                            {model.enabled
+                              ? shortAiModelLabel(model)
+                              : `${shortAiModelLabel(model)} (Needs key)`}
                           </option>
                         ))}
                       </select>
@@ -992,7 +1038,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                       </div>
                     </div>
                     <button
-                      className="grid h-9 w-9 place-items-center rounded-full bg-[#6467ff] text-white transition hover:bg-[#7073ff] disabled:cursor-not-allowed disabled:opacity-45"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#6467ff] text-white transition hover:bg-[#7073ff] disabled:cursor-not-allowed disabled:opacity-45"
                       type="button"
                       disabled={!canSendAi}
                       onClick={() => void handleAiEdit()}
@@ -1012,14 +1058,14 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           <section className="relative min-h-0 flex-1 overflow-hidden mymake-grid-canvas">
             <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_34%_18%,rgba(89,97,180,0.13),transparent_24%),radial-gradient(circle_at_70%_52%,rgba(255,255,255,0.02),transparent_28%)]" />
 
-            <div className="relative flex h-full items-center justify-center px-5 pb-5 pt-4">
+            <div className="relative flex h-full items-center justify-center px-2 pb-2 pt-2">
               {currentProject ? (
                 <div className="flex h-full w-full items-center justify-center overflow-auto">
                   <div
                     className="transition-all duration-300"
                     style={{
-                      width: previewWidth,
-                      maxWidth: "100%",
+                      width: currentDevice.width,
+                      maxWidth: currentDevice.maxWidth,
                     }}
                   >
                     <iframe
@@ -1027,7 +1073,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                       ref={iframeRef}
                       title={`${currentProject.project.name} preview`}
                       src={`${currentProject.preview.url}/`}
-                      className="h-[calc(100vh-92px)] min-h-[560px] w-full rounded-[20px] border border-white/[0.06] bg-white shadow-[0_30px_60px_rgba(0,0,0,0.22)]"
+                      className="h-[calc(100vh-74px)] min-h-[600px] w-full rounded-[20px] border border-white/[0.06] bg-white shadow-[0_30px_60px_rgba(0,0,0,0.22)]"
                       onLoad={() => {
                         iframeRef.current?.contentWindow?.postMessage(
                           {
