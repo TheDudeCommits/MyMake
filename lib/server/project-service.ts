@@ -525,11 +525,28 @@ export async function getWorkspaceSnapshot(
     ensurePreview?: boolean;
   } = {},
 ): Promise<ProjectWorkspace> {
+  let project = getProjectRow(projectId);
+  let previewStatus: ProjectWorkspace["preview"]["status"] =
+    project.status === "error" ? "error" : project.status === "ready" ? "ready" : "starting";
+
   if (options.ensurePreview) {
-    await ensurePreviewRunner(projectId);
+    try {
+      await ensurePreviewRunner(projectId);
+      previewStatus = "ready";
+    } catch {
+      getDb()
+        .prepare(
+          `UPDATE projects
+              SET status = ?, last_opened_at = ?
+            WHERE id = ?`,
+        )
+        .run("error", nowIso(), projectId);
+      previewStatus = "error";
+    }
+
+    project = getProjectRow(projectId);
   }
 
-  const project = getProjectRow(projectId);
   const files = await listProjectFiles(project.extractedPath);
   const currentFilePath =
     options.currentFilePath ||
@@ -550,7 +567,7 @@ export async function getWorkspaceSnapshot(
     currentFileContent,
     preview: {
       url: `/preview/${projectId}`,
-      status: project.status === "error" ? "error" : options.ensurePreview ? "ready" : "starting",
+      status: project.status === "error" ? "error" : previewStatus,
       port: project.previewPort,
     },
   };
@@ -566,7 +583,7 @@ export async function getDashboardSnapshot(
     projects,
     currentProjectId,
     currentProject: currentProjectId
-      ? await getWorkspaceSnapshot(currentProjectId, { ensurePreview: true })
+      ? await getWorkspaceSnapshot(currentProjectId, { ensurePreview: false })
       : null,
     aiModels: listAiModels(),
     defaultAiModelKey: DEFAULT_AI_MODEL_KEY,

@@ -265,6 +265,13 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
       return runner;
     } catch (error) {
       runner.status = "error";
+      getDb()
+        .prepare(
+          `UPDATE projects
+              SET preview_port = NULL, status = ?, last_opened_at = ?
+            WHERE id = ?`,
+        )
+        .run("error", new Date().toISOString(), projectId);
       await stopPreviewRunner(projectId);
       throw error;
     } finally {
