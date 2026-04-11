@@ -182,6 +182,23 @@ async function getRunnerSpec(
   throw new Error("Unsupported preview runtime for this project.");
 }
 
+function markRunnerReady(runner: PreviewRunnerState): void {
+  if (runner.status === "ready") {
+    touchRunner(runner);
+    return;
+  }
+
+  runner.status = "ready";
+  touchRunner(runner);
+  getDb()
+    .prepare(
+      `UPDATE projects
+          SET preview_port = ?, status = ?, last_opened_at = ?
+        WHERE id = ?`,
+    )
+    .run(runner.port, "ready", new Date().toISOString(), runner.projectId);
+}
+
 async function prunePreviewRunners(preferredProjectId: string): Promise<void> {
   const runtime = getRuntimeState();
   const now = Date.now();
@@ -289,7 +306,15 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
     touchRunner(runner);
 
     child.stdout?.on("data", (chunk) => {
-      process.stdout.write(`[preview:${projectId}] ${chunk}`);
+      const text = String(chunk);
+      process.stdout.write(`[preview:${projectId}] ${text}`);
+      if (
+        text.includes(`127.0.0.1:${port}`) ||
+        text.includes("Preview runner ready") ||
+        text.includes("ready in")
+      ) {
+        markRunnerReady(runner);
+      }
     });
     child.stderr?.on("data", (chunk) => {
       process.stderr.write(`[preview:${projectId}] ${chunk}`);
@@ -303,15 +328,7 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
 
     try {
       await waitForRunner(targetUrl);
-      runner.status = "ready";
-      touchRunner(runner);
-      getDb()
-        .prepare(
-          `UPDATE projects
-              SET preview_port = ?, status = ?, last_opened_at = ?
-            WHERE id = ?`,
-        )
-        .run(port, "ready", new Date().toISOString(), projectId);
+      markRunnerReady(runner);
       return runner;
     } catch (error) {
       runner.status = "error";
