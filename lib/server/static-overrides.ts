@@ -319,7 +319,7 @@ async function pathExists(targetPath: string): Promise<boolean> {
   }
 }
 
-interface OverrideConfigValue {
+export interface OverrideConfigValue {
   enabled: boolean;
   elements: Array<Record<string, unknown>>;
   rootCssVars: Record<string, string>;
@@ -611,7 +611,7 @@ function evaluateExpression(expression: string): unknown {
   return script.runInNewContext({});
 }
 
-function readOverrideConfigValue(content: string): OverrideConfigValue {
+export function readOverrideConfigValue(content: string): OverrideConfigValue {
   const sandbox = { window: {} as Record<string, unknown> };
   new vm.Script(content, { filename: OVERRIDES_CONFIG_PATH }).runInNewContext(sandbox);
 
@@ -741,6 +741,26 @@ export async function appendElementOverride(
   const currentConfig = await fs.readFile(configPath, "utf8");
   const normalizedConfig = readOverrideConfigValue(currentConfig);
   normalizedConfig.elements = uniqueObjectList([...normalizedConfig.elements, entry]);
+  const nextConfig = serializeOverrideConfigValue(normalizedConfig);
+  if (nextConfig !== currentConfig) {
+    await fs.writeFile(configPath, nextConfig, "utf8");
+  }
+  return nextConfig;
+}
+
+export async function appendGlobalTextReplacement(
+  projectDir: string,
+  entry: Record<string, unknown>,
+): Promise<string> {
+  const configPath = path.join(projectDir, OVERRIDES_CONFIG_PATH);
+  const currentConfig = await fs.readFile(configPath, "utf8");
+  const normalizedConfig = readOverrideConfigValue(currentConfig);
+  const globalConfig = isPlainObject(normalizedConfig.global) ? { ...normalizedConfig.global } : {};
+  const textReplacements = Array.isArray(globalConfig.textReplacements)
+    ? globalConfig.textReplacements.filter(isPlainObject).map((item) => ({ ...item }))
+    : [];
+  globalConfig.textReplacements = uniqueObjectList([...textReplacements, entry]);
+  normalizedConfig.global = globalConfig;
   const nextConfig = serializeOverrideConfigValue(normalizedConfig);
   if (nextConfig !== currentConfig) {
     await fs.writeFile(configPath, nextConfig, "utf8");

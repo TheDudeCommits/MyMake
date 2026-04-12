@@ -886,18 +886,24 @@ function findDirectPropertyIntent(
   prompt: string,
   target: SelectionTarget | null,
 ): { type: "text" | "remove" | null; confidence: number } {
-  if (!target) {
+  const normalized = prompt.toLowerCase();
+  const hasQuotedReplacementIntent =
+    /\b(change|replace|rename)\b[\s\S]*["“'`].+?["”'`][\s\S]*\b(to|with)\b[\s\S]*["“'`]?.+$/i.test(
+      prompt,
+    );
+
+  if (!target && !hasQuotedReplacementIntent) {
     return { type: null, confidence: 0 };
   }
 
-  const normalized = prompt.toLowerCase();
   if (/\b(remove|delete|hide)\b/.test(normalized)) {
     return { type: "remove", confidence: 0.92 };
   }
 
   if (
-    /\b(change|replace|rename)\b/.test(normalized) &&
-    target.editableCapabilities.some((item) => item.key === "text")
+    (hasQuotedReplacementIntent ||
+      (/\b(change|replace|rename)\b/.test(normalized) &&
+        Boolean(target?.editableCapabilities.some((item) => item.key === "text"))))
   ) {
     return { type: "text", confidence: 0.88 };
   }
@@ -905,16 +911,61 @@ function findDirectPropertyIntent(
   return { type: null, confidence: 0 };
 }
 
+export function inferEditMode(params: {
+  prompt: string;
+  selectionTarget: SelectionTarget | null;
+  runtime: ProjectRuntime;
+}): EditMode {
+  const normalized = params.prompt.trim().toLowerCase();
+
+  if (
+    /\b(redesign|reimagine|overhaul|rework|explore|concept|creative|hero|landing page|brand refresh|color scheme|theme|palette|visual direction|make it feel)\b/.test(
+      normalized,
+    )
+  ) {
+    return "creative";
+  }
+
+  if (
+    /\b(remove|delete|hide|rename|replace|change|update|swap|set|increase|decrease|tighten|loosen|move|align|resize|make)\b/.test(
+      normalized,
+    ) &&
+    (params.selectionTarget ||
+      /\b(this|it|selected|top left|top-right|bottom left|bottom-right|button|card|heading|title|navbar|logo|hero|section)\b/.test(
+        normalized,
+      ))
+  ) {
+    return "precise";
+  }
+
+  if (params.runtime === "static" && /\b(change|replace|rename)\b/.test(normalized)) {
+    return "precise";
+  }
+
+  if (params.selectionTarget) {
+    return "scoped";
+  }
+
+  return "scoped";
+}
+
 export function buildEditPlan(params: {
   currentFilePath: string | null | undefined;
   currentFileContent: string | null;
-  editMode: EditMode;
+  editMode?: EditMode | null;
   prompt: string;
   runtime: ProjectRuntime;
   selectionTarget: SelectionTarget | null;
   contextGraph: ContextGraphResult;
   hasStaticEditableSupport: boolean;
 }): EditPlan {
+  const resolvedEditMode =
+    params.editMode ||
+    inferEditMode({
+      prompt: params.prompt,
+      selectionTarget: params.selectionTarget,
+      runtime: params.runtime,
+    });
   const directIntent = findDirectPropertyIntent(params.prompt, params.selectionTarget);
   const isLargeActiveFile = Boolean(params.currentFileContent && params.currentFileContent.length > 120_000);
   const strategy =
@@ -922,14 +973,14 @@ export function buildEditPlan(params: {
       ? "direct-property"
       : params.runtime === "static" && params.hasStaticEditableSupport && params.selectionTarget
         ? "static-override"
-        : isLargeActiveFile || params.editMode === "precise"
+        : isLargeActiveFile || resolvedEditMode === "precise"
           ? "patch"
           : "rewrite";
 
   const risk =
     strategy === "direct-property" || strategy === "static-override"
       ? "low"
-      : params.editMode === "creative"
+      : resolvedEditMode === "creative"
         ? "high"
         : "medium";
 
@@ -937,7 +988,7 @@ export function buildEditPlan(params: {
     params.selectionTarget
       ? `Targeting ${params.selectionTarget.label} on ${params.selectionTarget.route}.`
       : "No exact element selected, so the edit will use route and file context.",
-    `Edit mode is ${params.editMode}.`,
+    `Edit mode is ${resolvedEditMode}.`,
     strategy === "patch"
       ? "Using patch mode to constrain file changes."
       : strategy === "rewrite"
@@ -948,11 +999,11 @@ export function buildEditPlan(params: {
   ];
 
   return {
-    mode: params.editMode,
+    mode: resolvedEditMode,
     target: params.selectionTarget,
     strategy,
     risk,
-    candidateFiles: params.contextGraph.candidateFiles.slice(0, params.editMode === "creative" ? 8 : 5),
+    candidateFiles: params.contextGraph.candidateFiles.slice(0, resolvedEditMode === "creative" ? 8 : 5),
     validationSet: ["imports", "preview", ...(params.selectionTarget ? ["selector"] : []), "design"],
     rationale,
   };

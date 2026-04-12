@@ -39,7 +39,6 @@ import type {
   ConversationTurnRecord,
   DashboardSnapshot,
   DevicePreset,
-  EditMode,
   FileNode,
   MakeKitRecord,
   ProjectRecord,
@@ -59,7 +58,6 @@ const DEVICE_PRESETS: Record<
 
 const DEVICE_ORDER: DevicePreset[] = ["desktop", "tablet", "mobile"];
 const AI_MODEL_STORAGE_KEY = "mymake-selected-ai-model";
-const EDIT_MODE_STORAGE_KEY = "mymake-selected-edit-mode";
 const EMPTY_REVISIONS: RevisionRecord[] = [];
 const EMPTY_ATTACHMENTS: AttachmentRecord[] = [];
 const EMPTY_TURNS: ConversationTurnRecord[] = [];
@@ -168,18 +166,6 @@ function shortAiModelLabel(model: AiModelOption): string {
   }
 
   return model.label;
-}
-
-function shortEditModeLabel(mode: EditMode): string {
-  if (mode === "precise") {
-    return "Precise";
-  }
-
-  if (mode === "scoped") {
-    return "Scoped";
-  }
-
-  return "Creative";
 }
 
 function checkpointLabel(revision: RevisionRecord): string {
@@ -759,7 +745,6 @@ function HomeDashboard({
 export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSnapshot }) {
   const [snapshot, setSnapshot] = useState(initialSnapshot);
   const [devicePreset, setDevicePreset] = useState<DevicePreset>("desktop");
-  const [editMode, setEditMode] = useState<EditMode>("scoped");
   const [isPicking, setIsPicking] = useState(false);
   const [isCodePanelOpen, setIsCodePanelOpen] = useState(false);
   const [selectedAiModelKey, setSelectedAiModelKey] = useState<AiModelKey>(
@@ -884,17 +869,6 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   }, [snapshot.aiModels]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const storedMode = window.localStorage.getItem(EDIT_MODE_STORAGE_KEY) as EditMode | null;
-    if (storedMode && ["precise", "scoped", "creative"].includes(storedMode)) {
-      setEditMode(storedMode);
-    }
-  }, []);
-
-  useEffect(() => {
     if (!snapshot.aiModels.some((model) => model.key === selectedAiModelKey && model.enabled)) {
       setSelectedAiModelKey(fallbackAiModelKey);
     }
@@ -907,14 +881,6 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     window.localStorage.setItem(AI_MODEL_STORAGE_KEY, selectedAiModelKey);
   }, [selectedAiModelKey]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(EDIT_MODE_STORAGE_KEY, editMode);
-  }, [editMode]);
 
   useEffect(() => {
     setEditorFilePath(currentProject?.currentFilePath || null);
@@ -1270,7 +1236,6 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           prompt,
           selection: selectedElement,
           attachmentIds: selectedAttachmentIds,
-          editMode,
           aiModelKey: selectedAiModel.key,
           currentFilePath: editorFilePath,
         }),
@@ -1744,11 +1709,6 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                               <div className="flex justify-end">
                                 <div className="max-w-[88%] rounded-[18px] border border-[#5f62ff]/28 bg-[#5f62ff]/12 px-3.5 py-3 text-left">
                                   <p className="text-sm leading-6 text-white">{turn.prompt}</p>
-                                  {turn.editMode ? (
-                                    <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-[#cfd1ff]">
-                                      {shortEditModeLabel(turn.editMode)}
-                                    </p>
-                                  ) : null}
                                 </div>
                               </div>
                             ) : null}
@@ -1905,23 +1865,6 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   </div>
 
                   <div className="flex min-w-0 items-center justify-end gap-2">
-                    <div className="relative">
-                      <select
-                        className="h-8 w-[104px] appearance-none rounded-full border border-white/[0.08] bg-[#262628] px-3 pr-8 text-[11px] text-slate-300 outline-none transition hover:bg-[#303238]"
-                        value={editMode}
-                        onChange={(event) => setEditMode(event.target.value as EditMode)}
-                        title={`Edit mode: ${shortEditModeLabel(editMode)}`}
-                      >
-                        <option value="precise">Precise</option>
-                        <option value="scoped">Scoped</option>
-                        <option value="creative">Creative</option>
-                      </select>
-                      <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rotate-90 text-slate-500">
-                        <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5">
-                          <path d="M6 3L11 8L6 13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      </div>
-                    </div>
                     <div className="relative">
                       <select
                         className="h-8 w-[118px] appearance-none rounded-full border border-white/[0.08] bg-[#262628] px-3 pr-8 text-[11px] text-slate-300 outline-none transition hover:bg-[#303238]"

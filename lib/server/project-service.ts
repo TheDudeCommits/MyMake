@@ -49,6 +49,7 @@ import {
 } from "@/lib/server/project-validation";
 import {
   appendElementOverride,
+  appendGlobalTextReplacement,
   ensureStaticEditableOverridesSupport,
   getPreferredStaticEditableFile,
   hasStaticEditableOverrides,
@@ -59,6 +60,7 @@ import {
   OVERRIDES_README_PATH,
   OVERRIDES_SECTION_HOOKS_PATH,
   OVERRIDES_SECTION_NAMES_PATH,
+  readOverrideConfigValue,
 } from "@/lib/server/static-overrides";
 import {
   archiveDirectoryToFile,
@@ -659,6 +661,10 @@ function normalizePrompt(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function stripWrappingQuotes(value: string): string {
+  return value.replace(/^["“'`]+|["”'`]+$/g, "").trim();
+}
+
 function buildExactSelectedOverrideTarget(selection: SelectionPayload): Record<string, unknown> | null {
   if (selection.scopeSelector && selection.scopedSelector) {
     return {
@@ -702,11 +708,29 @@ function promptRequestsHideSelection(prompt: string): boolean {
   );
 }
 
-function extractDirectReplacementText(
+function extractRequestedTextChange(
   prompt: string,
   selection: SelectionPayload | null,
-): string | null {
+): { sourceText: string; replacementText: string; source: "selection" | "prompt" } | null {
   const normalizedPrompt = normalizePrompt(prompt);
+  const quotedPatterns = [
+    /^(?:change|replace|rename)\s+(?:the\s+)?["“'`](.+?)["”'`](?:.+?)?\b(?:to|with)\b\s+["“'`]?(.+?)["”'`]?\s*$/i,
+    /^(?:change|replace|rename)\s+["“'`](.+?)["”'`](?:.+?)?\b(?:to|with)\b\s+["“'`]?(.+?)["”'`]?\s*$/i,
+  ];
+
+  for (const pattern of quotedPatterns) {
+    const match = normalizedPrompt.match(pattern);
+    const sourceText = stripWrappingQuotes(match?.[1] || "");
+    const replacementText = stripWrappingQuotes(match?.[2] || "");
+    if (sourceText && replacementText && sourceText !== replacementText) {
+      return {
+        sourceText,
+        replacementText,
+        source: "prompt",
+      };
+    }
+  }
+
   const patterns = [
     /^(?:change|replace|rename)\s+this(?:\s+fully)?\s+(?:to|with)\s+["“]?(.+?)["”]?\s*$/i,
     /^(?:change|replace|rename)\s+it\s+(?:to|with)\s+["“]?(.+?)["”]?\s*$/i,
@@ -714,8 +738,14 @@ function extractDirectReplacementText(
 
   for (const pattern of patterns) {
     const match = normalizedPrompt.match(pattern);
-    if (match?.[1]) {
-      return match[1].trim();
+    const replacementText = stripWrappingQuotes(match?.[1] || "");
+    const sourceText = selection?.textContent?.trim() || "";
+    if (replacementText && sourceText && sourceText !== replacementText) {
+      return {
+        sourceText,
+        replacementText,
+        source: "selection",
+      };
     }
   }
 
@@ -729,7 +759,16 @@ function extractDirectReplacementText(
   }
 
   const replacementMatch = normalizedPrompt.match(/\b(?:to|with)\b\s+["“]?(.+?)["”]?\s*$/i);
-  return replacementMatch?.[1]?.trim() || null;
+  const replacementText = stripWrappingQuotes(replacementMatch?.[1] || "");
+  if (!replacementText || selection.textContent.trim() === replacementText) {
+    return null;
+  }
+
+  return {
+    sourceText: selection.textContent.trim(),
+    replacementText,
+    source: "selection",
+  };
 }
 
 async function tryApplyStaticSelectionFallback(params: {
@@ -772,41 +811,116 @@ async function tryApplyStaticSelectionFallback(params: {
     };
   }
 
-  const replacementText = extractDirectReplacementText(params.prompt, params.selection);
-  if (!replacementText) {
+  const textChange = extractRequestedTextChange(params.prompt, params.selection);
+  if (!textChange) {
     return null;
   }
 
+  let nextConfig: string | null = null;
   const target = buildExactSelectedOverrideTarget(params.selection);
-  if (!target) {
-    return null;
+  const canSetDirectText =
+    Boolean(target) &&
+    params.selection.editableProperties.includes("text") &&
+    textChange.source === "selection";
+
+  if (canSetDirectText && target) {
+    nextConfig = await appendElementOverride(params.projectDir, {
+      ...target,
+      text: textChange.replacementText,
+    });
   }
 
-  const nextConfig = await appendElementOverride(params.projectDir, {
-    ...target,
-    ...(params.selection.textContent
+  nextConfig = await appendGlobalTextReplacement(params.projectDir, {
+    find: textChange.sourceText,
+    replace: textChange.replacementText,
+    ...(params.selection.scopeSelector
       ? {
-          find: params.selection.textContent,
-          replace: replacementText,
+          scopeSelector: params.selection.scopeSelector,
         }
-      : {
-          text: replacementText,
-        }),
+      : params.selection.selector
+        ? {
+            scopeSelector: params.selection.selector,
+          }
+        : {}),
   });
 
+  if (!nextConfig) {
+    return null;
+  }
+
   return {
-    summary: params.selection.textContent
-      ? `Updated the selected text from "${params.selection.textContent}" to "${replacementText}" using a scoped element override.`
-      : `Updated the selected text to "${replacementText}".`,
+    summary:
+      textChange.source === "prompt"
+        ? `Updated "${textChange.sourceText}" to "${textChange.replacementText}".`
+        : `Updated the selected text from "${textChange.sourceText}" to "${textChange.replacementText}".`,
     warnings: [],
     changedFiles: [
       {
         path: OVERRIDES_CONFIG_PATH,
         content: nextConfig,
-        reason: "Update the selected Framer text layer with a direct override.",
+        reason: "Update the selected Framer/static text layer with a reliable text override.",
       },
     ],
   };
+}
+
+function validateConcreteTextChangePersisted(params: {
+  changedFiles: Array<{ path: string; content: string; reason?: string }>;
+  prompt: string;
+  selection: SelectionPayload | null;
+}): void {
+  const textChange = extractRequestedTextChange(params.prompt, params.selection);
+  if (!textChange) {
+    return;
+  }
+
+  for (const file of params.changedFiles) {
+    if (file.path !== OVERRIDES_CONFIG_PATH) {
+      if (
+        file.content.includes(textChange.replacementText) &&
+        !file.content.includes(textChange.sourceText)
+      ) {
+        return;
+      }
+
+      if (file.content.includes(textChange.replacementText)) {
+        return;
+      }
+      continue;
+    }
+
+    const config = readOverrideConfigValue(file.content);
+    const globalTextReplacements = Array.isArray(config.global?.textReplacements)
+      ? config.global.textReplacements
+      : [];
+    const hasGlobalReplacement = globalTextReplacements.some(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        "find" in entry &&
+        "replace" in entry &&
+        (entry as Record<string, unknown>).find === textChange.sourceText &&
+        (entry as Record<string, unknown>).replace === textChange.replacementText,
+    );
+    if (hasGlobalReplacement) {
+      return;
+    }
+
+    const hasElementReplacement = config.elements.some((entry) => {
+      const record = entry as Record<string, unknown>;
+      return (
+        record.text === textChange.replacementText ||
+        (record.find === textChange.sourceText && record.replace === textChange.replacementText)
+      );
+    });
+    if (hasElementReplacement) {
+      return;
+    }
+  }
+
+  throw new Error(
+    `The requested text change from "${textChange.sourceText}" to "${textChange.replacementText}" was not persisted in a concrete file change.`,
+  );
 }
 
 async function validateProjectImports(projectDir: string): Promise<void> {
@@ -1675,9 +1789,8 @@ async function tryApplyDirectTextReplacement(params: {
     }
   | null
 > {
-  const replacementText = extractDirectReplacementText(params.prompt, params.selection);
-  const sourceText = params.selection?.textContent?.trim();
-  if (!replacementText || !sourceText) {
+  const textChange = extractRequestedTextChange(params.prompt, params.selection);
+  if (!textChange) {
     return null;
   }
 
@@ -1695,18 +1808,21 @@ async function tryApplyDirectTextReplacement(params: {
     }
 
     const currentContent = await fs.readFile(absolutePath, "utf8");
-    if (!currentContent.includes(sourceText)) {
+    if (!currentContent.includes(textChange.sourceText)) {
       continue;
     }
 
     return {
-      summary: `Updated "${sourceText}" to "${replacementText}" directly in ${filePath}.`,
+      summary: `Updated "${textChange.sourceText}" to "${textChange.replacementText}" directly in ${filePath}.`,
       warnings: [],
       changedFiles: [
         {
           path: filePath,
-          content: currentContent.replace(sourceText, replacementText),
-          reason: "Direct text replacement from the selected element.",
+          content: currentContent.replace(textChange.sourceText, textChange.replacementText),
+          reason:
+            textChange.source === "prompt"
+              ? "Direct text replacement from the prompt."
+              : "Direct text replacement from the selected element.",
         },
       ],
       rawResponse: null,
@@ -1722,11 +1838,17 @@ async function runEditValidation(params: {
   changedFiles: Array<{ path: string; content: string; reason?: string }>;
   prompt: string;
   editMode: EditMode;
+  selection: SelectionPayload | null;
   selectionTarget: SelectionTarget | null;
   rawProviderOutput: string | null;
 }): Promise<Omit<ValidationResultRecord, "id" | "createdAt">> {
   await validateChangedFileImports(params.projectDir, params.changedFiles);
   validateEditableOverrideSyntax(params.changedFiles);
+  validateConcreteTextChangePersisted({
+    changedFiles: params.changedFiles,
+    prompt: params.prompt,
+    selection: params.selection,
+  });
   await validateProjectImports(params.projectDir);
 
   await maybeRefreshPreview(
@@ -1829,7 +1951,6 @@ export async function applyAiEdit(
     projectFiles,
     payload.currentFilePath,
   );
-  const editMode: EditMode = payload.editMode || "scoped";
   const route = payload.selection?.route || "/";
   const activeFileContent =
     effectiveCurrentFilePath &&
@@ -1859,13 +1980,14 @@ export async function applyAiEdit(
   const editPlan = buildEditPlan({
     currentFilePath: effectiveCurrentFilePath,
     currentFileContent: activeFileContent,
-    editMode,
+    editMode: payload.editMode,
     prompt: payload.prompt,
     runtime,
     selectionTarget,
     contextGraph,
     hasStaticEditableSupport: hasStaticEditableOverrides(projectFiles),
   });
+  const editMode: EditMode = editPlan.mode;
   const activeKitSummaries = describeKitAssets(kits);
   const provider =
     (payload.aiModelKey || DEFAULT_AI_MODEL_KEY).startsWith("openai")
@@ -2089,6 +2211,7 @@ export async function applyAiEdit(
       changedFiles,
       prompt: payload.prompt,
       editMode,
+      selection: payload.selection,
       selectionTarget,
       rawProviderOutput: aiResult.rawResponse,
     });
