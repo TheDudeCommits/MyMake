@@ -117,6 +117,15 @@ export interface GitHubConnectionRecord {
   avatarUrl: string | null;
 }
 
+export interface AppUserRecord {
+  id: string;
+  email: string | null;
+  displayName: string | null;
+  avatarUrl: string | null;
+  createdAt: string;
+  lastSeenAt: string;
+}
+
 export interface GitHubRepoSummary {
   id: number;
   owner: string;
@@ -131,6 +140,7 @@ export interface GitHubRepoSummary {
 
 export interface ProjectGitHubBindingRecord {
   projectId: string;
+  githubConnectionId: string;
   owner: string;
   repo: string;
   branch: string;
@@ -270,6 +280,7 @@ export interface ProjectWorkspace {
 }
 
 export interface DashboardSnapshot {
+  viewer: AppUserRecord | null;
   projects: ProjectRecord[];
   currentProjectId: string | null;
   currentProject: ProjectWorkspace | null;

@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { DEFAULT_AI_MODEL_KEY, listAiModels } from "@/lib/server/ai";
-import { getGitHubConnectionStatus } from "@/lib/server/github";
-import { createProjectFromUpload, listProjects } from "@/lib/server/project-service";
+import { createProjectFromUpload, getDashboardSnapshot } from "@/lib/server/project-service";
 
 export const runtime = "nodejs";
 
@@ -16,13 +14,10 @@ export async function POST(request: Request) {
 
     const buffer = Buffer.from(await file.arrayBuffer());
     const workspace = await createProjectFromUpload(file.name, buffer);
+    const snapshot = await getDashboardSnapshot(workspace.project.id);
     return NextResponse.json({
-      projects: await listProjects(),
-      currentProjectId: workspace.project.id,
+      ...snapshot,
       currentProject: workspace,
-      githubConnection: getGitHubConnectionStatus(),
-      aiModels: listAiModels(),
-      defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
     });
   } catch (error) {
     return NextResponse.json(

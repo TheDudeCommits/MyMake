@@ -1,6 +1,7 @@
 "use client";
 
 import MonacoEditor from "@monaco-editor/react";
+import { usePrivy } from "@privy-io/react-auth";
 import {
   Bell,
   ChevronDown,
@@ -519,7 +520,13 @@ function ChevronSmall({ open }: { open: boolean }) {
   );
 }
 
-function UserBadgeButton({ onClick }: { onClick: () => void }) {
+function UserBadgeButton({
+  onClick,
+  label,
+}: {
+  onClick: () => void;
+  label: string;
+}) {
   return (
     <button
       className="group relative grid h-8 w-8 place-items-center rounded-full bg-[#6675a0] text-white transition hover:bg-[#7787b6]"
@@ -528,7 +535,9 @@ function UserBadgeButton({ onClick }: { onClick: () => void }) {
       aria-label="Sign out"
       onClick={onClick}
     >
-      <span className="text-[12px] font-semibold transition group-hover:opacity-0">A</span>
+      <span className="text-[12px] font-semibold uppercase transition group-hover:opacity-0">
+        {label.slice(0, 1)}
+      </span>
       <LogOut className="absolute h-4 w-4 opacity-0 transition group-hover:opacity-100" />
     </button>
   );
@@ -615,6 +624,7 @@ function HomeDashboard({
   onUploadClick,
   projectNameCounts,
   totalProjects,
+  viewer,
 }: {
   feedback: string | null;
   error: string | null;
@@ -630,17 +640,21 @@ function HomeDashboard({
   onUploadClick: () => void;
   projectNameCounts: Map<string, number>;
   totalProjects: number;
+  viewer: DashboardSnapshot["viewer"];
 }) {
+  const viewerLabel = viewer?.displayName || viewer?.email || "A";
+  const workspaceTitle = viewer?.email || "Personal workspace";
+
   return (
     <main className="h-screen overflow-hidden bg-[#2b2c30] text-[#f3f4f8]">
       <div className="grid h-full grid-cols-[220px_minmax(0,1fr)]">
         <aside className="flex min-h-0 flex-col border-r border-white/[0.08] bg-[#242528] px-3 pb-4 pt-3">
           <div className="flex items-center justify-between gap-3 px-2">
             <div className="flex min-w-0 items-center gap-3">
-              <UserBadgeButton onClick={onLogout} />
+              <UserBadgeButton onClick={onLogout} label={viewerLabel} />
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-white">amirhor98</p>
-                <p className="text-xs text-slate-400">Personal workspace</p>
+                <p className="truncate text-sm font-medium text-white">{viewerLabel}</p>
+                <p className="truncate text-xs text-slate-400">{workspaceTitle}</p>
               </div>
             </div>
             <Bell className="h-4 w-4 shrink-0 text-slate-500" />
@@ -982,6 +996,7 @@ function GitHubModal({
 }
 
 export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSnapshot }) {
+  const { logout } = usePrivy();
   const [snapshot, setSnapshot] = useState(initialSnapshot);
   const [devicePreset, setDevicePreset] = useState<DevicePreset>("desktop");
   const [isPicking, setIsPicking] = useState(false);
@@ -1033,6 +1048,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const previousRevisionIdRef = useRef<string | null>(null);
 
   const currentProject = snapshot.currentProject;
+  const viewer = snapshot.viewer;
   const githubConnection = snapshot.githubConnection;
   const githubBinding = currentProject?.githubBinding ?? null;
   const revisions = currentProject?.revisions ?? EMPTY_REVISIONS;
@@ -1697,7 +1713,10 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   }
 
   async function handleLogout() {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await Promise.allSettled([
+      fetch("/api/auth/logout", { method: "POST" }),
+      logout(),
+    ]);
     window.location.href = "/auth";
   }
 
@@ -1996,6 +2015,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           onUploadClick={() => projectUploadInputRef.current?.click()}
           projectNameCounts={projectNameCounts}
           totalProjects={snapshot.projects.length}
+          viewer={viewer}
         />
         {isGitHubModalOpen ? (
           <GitHubModal
@@ -2168,7 +2188,10 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   </div>
                 ) : null}
               </div>
-              <UserBadgeButton onClick={() => void handleLogout()} />
+              <UserBadgeButton
+                onClick={() => void handleLogout()}
+                label={viewer?.displayName || viewer?.email || "A"}
+              />
             </div>
           </div>
         </header>

@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 
+import { PrivyAppProvider } from "@/components/privy-app-provider";
+import { getEnv } from "@/lib/server/env";
+
 import "./globals.css";
 
 const geistSans = localFont({
@@ -25,10 +28,12 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const privyAppId = getEnv().publicPrivyAppId || "";
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${geistSans.variable} ${geistMono.variable}`}>
-        {children}
+        <PrivyAppProvider appId={privyAppId}>{children}</PrivyAppProvider>
       </body>
     </html>
   );

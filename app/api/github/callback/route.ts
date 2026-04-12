@@ -5,6 +5,7 @@ import {
   exchangeGitHubCodeForToken,
   GITHUB_REDIRECT_COOKIE_NAME,
   GITHUB_STATE_COOKIE_NAME,
+  GITHUB_USER_COOKIE_NAME,
   upsertGitHubConnection,
 } from "@/lib/server/github";
 
@@ -16,11 +17,13 @@ export async function GET(request: Request) {
   const state = requestUrl.searchParams.get("state");
   const expectedState = cookies().get(GITHUB_STATE_COOKIE_NAME)?.value;
   const redirectPath = cookies().get(GITHUB_REDIRECT_COOKIE_NAME)?.value || "/";
+  const userId = cookies().get(GITHUB_USER_COOKIE_NAME)?.value;
 
   cookies().delete(GITHUB_STATE_COOKIE_NAME);
   cookies().delete(GITHUB_REDIRECT_COOKIE_NAME);
+  cookies().delete(GITHUB_USER_COOKIE_NAME);
 
-  if (!code || !state || !expectedState || state !== expectedState) {
+  if (!code || !state || !expectedState || state !== expectedState || !userId) {
     const failedUrl = new URL(redirectPath, requestUrl.origin);
     failedUrl.searchParams.set("github", "failed");
     return NextResponse.redirect(failedUrl);
@@ -32,7 +35,7 @@ export async function GET(request: Request) {
       code,
       redirectUri,
     });
-    await upsertGitHubConnection(token);
+    await upsertGitHubConnection(userId, token);
 
     const successUrl = new URL(redirectPath, requestUrl.origin);
     successUrl.searchParams.set("github", "connected");

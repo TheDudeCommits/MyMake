@@ -5,6 +5,10 @@ interface EnvConfig {
   githubClientId?: string;
   githubClientSecret?: string;
   openaiApiKey?: string;
+  privyAppId?: string;
+  privyAppSecret?: string;
+  publicPrivyAppId?: string;
+  primaryOwnerEmail: string;
   appPasscode: string;
   appBaseUrl?: string;
   databasePath: string;
@@ -30,6 +34,10 @@ export function getEnv(): EnvConfig {
     githubClientId: process.env.GITHUB_CLIENT_ID,
     githubClientSecret: process.env.GITHUB_CLIENT_SECRET,
     openaiApiKey: process.env.OPENAI_API_KEY,
+    privyAppId: process.env.PRIVY_APP_ID || process.env.NEXT_PUBLIC_PRIVY_APP_ID,
+    privyAppSecret: process.env.PRIVY_APP_SECRET,
+    publicPrivyAppId: process.env.NEXT_PUBLIC_PRIVY_APP_ID || process.env.PRIVY_APP_ID,
+    primaryOwnerEmail: process.env.PRIMARY_OWNER_EMAIL || "Amir.razagh76@gmail.com",
     appPasscode:
       process.env.APP_PASSCODE ||
       (process.env.NODE_ENV === "production"

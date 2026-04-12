@@ -14,10 +14,12 @@ import {
   requestAiEdit,
   requestAiPatchEdit,
 } from "@/lib/server/ai";
+import { requireCurrentAppUser } from "@/lib/server/auth-next";
 import { getDb } from "@/lib/server/db";
 import { getEnv } from "@/lib/server/env";
 import {
   createGitHubRepo,
+  getGitHubConnectionById,
   getGitHubConnectionStatus,
   getGitHubRepo,
   getStoredGitHubConnection,
@@ -125,6 +127,10 @@ const CONFIG_RESTART_FILES = new Set([
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+async function requireCurrentUserId(): Promise<string> {
+  return (await requireCurrentAppUser()).id;
 }
 
 function requireRuntime(runtime: ProjectRuntime | null | undefined): ProjectRuntime {
@@ -250,6 +256,7 @@ function mapProjectGitHubBindingRow(
 ): ProjectGitHubBindingRecord {
   return {
     projectId: String(row.project_id),
+    githubConnectionId: String(row.github_connection_id),
     owner: String(row.owner),
     repo: String(row.repo),
     branch: String(row.branch),
@@ -286,10 +293,14 @@ function mapConversationTurnRow(row: Record<string, unknown>): ConversationTurnR
   };
 }
 
-function getProjectRow(projectId: string): ProjectRecord {
-  const row = getDb()
-    .prepare("SELECT * FROM projects WHERE id = ?")
-    .get(projectId) as Record<string, unknown> | undefined;
+function getProjectRow(projectId: string, ownerUserId?: string | null): ProjectRecord {
+  const row = ownerUserId
+    ? ((getDb()
+        .prepare("SELECT * FROM projects WHERE id = ? AND owner_user_id = ?")
+        .get(projectId, ownerUserId) as Record<string, unknown> | undefined))
+    : ((getDb()
+        .prepare("SELECT * FROM projects WHERE id = ?")
+        .get(projectId) as Record<string, unknown> | undefined));
 
   if (!row) {
     throw new Error("Project not found.");
@@ -1275,8 +1286,8 @@ async function trimOldRevisions(projectId: string): Promise<void> {
   }
 }
 
-async function pruneRedoBranch(projectId: string): Promise<void> {
-  const project = getProjectRow(projectId);
+async function pruneRedoBranch(projectId: string, ownerUserId?: string): Promise<void> {
+  const project = getProjectRow(projectId, ownerUserId);
   if (!project.currentRevisionId) {
     return;
   }
@@ -1302,8 +1313,9 @@ async function createRevision(params: {
   label: string;
   source: RevisionRecord["source"];
   summary?: string | null;
+  ownerUserId?: string;
 }): Promise<RevisionRecord> {
-  const project = getProjectRow(params.projectId);
+  const project = getProjectRow(params.projectId, params.ownerUserId);
   const currentRevision = project.currentRevisionId
     ? getRevisionById(project.currentRevisionId)
     : null;
@@ -1651,13 +1663,15 @@ async function maybeRefreshPreview(projectId: string, changedPaths: string[]): P
 
 export async function listProjects(): Promise<ProjectRecord[]> {
   await ensureStorageReady();
+  const userId = await requireCurrentUserId();
   const rows = getDb()
     .prepare(
       `SELECT *
          FROM projects
+        WHERE owner_user_id = ?
         ORDER BY last_opened_at DESC`,
     )
-    .all() as Record<string, unknown>[];
+    .all(userId) as Record<string, unknown>[];
   return rows.map(mapProjectRow);
 }
 
@@ -1666,9 +1680,11 @@ export async function getWorkspaceSnapshot(
   options: {
     currentFilePath?: string | null;
     ensurePreview?: boolean;
+    allowPublic?: boolean;
   } = {},
 ): Promise<ProjectWorkspace> {
-  let project = getProjectRow(projectId);
+  const userId = options.allowPublic ? null : await requireCurrentUserId();
+  let project = getProjectRow(projectId, userId);
   const runtime = requireRuntime(await detectProjectRuntime(project.extractedPath));
   await syncProjectKnowledgeAndKits(project, runtime);
   if (runtime === "static") {
@@ -1695,8 +1711,7 @@ export async function getWorkspaceSnapshot(
         .run("error", nowIso(), projectId);
       previewStatus = "error";
     }
-
-    project = getProjectRow(projectId);
+    project = getProjectRow(projectId, userId);
   } else if (project.status !== "error") {
     warmPreviewRunner(projectId);
   }
@@ -1713,7 +1728,7 @@ export async function getWorkspaceSnapshot(
       : null;
 
   return {
-    project: getProjectRow(projectId),
+    project: getProjectRow(projectId, userId),
     revisions: getRevisionRows(projectId),
     conversationTurns: getConversationTurns(projectId),
     attachments: getAttachmentRows(projectId),
@@ -1736,6 +1751,7 @@ export async function getWorkspaceSnapshot(
 export async function getDashboardSnapshot(
   selectedProjectId?: string | null,
 ): Promise<DashboardSnapshot> {
+  const viewer = await requireCurrentAppUser();
   const projects = await listProjects();
   const currentProjectId =
     selectedProjectId && projects.some((project) => project.id === selectedProjectId)
@@ -1743,19 +1759,21 @@ export async function getDashboardSnapshot(
       : null;
 
   return {
+    viewer,
     projects,
     currentProjectId,
     currentProject: currentProjectId
       ? await getWorkspaceSnapshot(currentProjectId, { ensurePreview: false })
       : null,
-    githubConnection: getGitHubConnectionStatus(),
+    githubConnection: getGitHubConnectionStatus(viewer.id),
     aiModels: listAiModels(),
     defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
   };
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
-  getProjectRow(projectId);
+  const userId = await requireCurrentUserId();
+  getProjectRow(projectId, userId);
 
   try {
     await stopPreviewRunner(projectId);
@@ -1768,7 +1786,7 @@ export async function deleteProject(projectId: string): Promise<void> {
 }
 
 export async function listAvailableGitHubRepos(): Promise<GitHubRepoSummary[]> {
-  return listGitHubRepos();
+  return listGitHubRepos(await requireCurrentUserId());
 }
 
 export async function createProjectFromGitHubRepo(params: {
@@ -1776,12 +1794,13 @@ export async function createProjectFromGitHubRepo(params: {
   repo: string;
 }): Promise<ProjectWorkspace> {
   await ensureStorageReady();
-  const connection = getStoredGitHubConnection();
+  const userId = await requireCurrentUserId();
+  const connection = getStoredGitHubConnection(userId);
   if (!connection) {
     throw new Error("Connect GitHub first to import a repo.");
   }
 
-  const repository = await getGitHubRepo(params.owner, params.repo);
+  const repository = await getGitHubRepo(params.owner, params.repo, userId);
   const projectId = nanoid(10);
   const timestamp = nowIso();
   const projectPaths = await ensureProjectDirectories(projectId);
@@ -1822,12 +1841,13 @@ export async function createProjectFromGitHubRepo(params: {
     getDb()
       .prepare(
         `INSERT INTO projects (
-          id, name, source_zip_path, extracted_path, package_manager, status,
+          id, owner_user_id, name, source_zip_path, extracted_path, package_manager, status,
           current_revision_id, manifest_hash, preview_port, last_opened_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         insertedProject.id,
+        userId,
         insertedProject.name,
         insertedProject.sourceZipPath,
         insertedProject.extractedPath,
@@ -1872,6 +1892,7 @@ export async function createProjectFromGitHubRepo(params: {
       label: "Initial import",
       source: "upload",
       summary: `Imported from ${repository.fullName}.`,
+      ownerUserId: userId,
     });
     const validationResult = await createValidationResultRecord({
       projectId,
@@ -1909,13 +1930,14 @@ export async function connectProjectToGitHubRepo(params: {
   repo: string;
   branch?: string | null;
 }): Promise<ProjectWorkspace> {
-  const project = getProjectRow(params.projectId);
-  const connection = getStoredGitHubConnection();
+  const userId = await requireCurrentUserId();
+  const project = getProjectRow(params.projectId, userId);
+  const connection = getStoredGitHubConnection(userId);
   if (!connection) {
     throw new Error("Connect GitHub first to link this project.");
   }
 
-  const repository = await getGitHubRepo(params.owner, params.repo);
+  const repository = await getGitHubRepo(params.owner, params.repo, userId);
   const branch =
     params.branch ||
     (getProjectGitHubBinding(params.projectId)?.source === "imported"
@@ -1958,8 +1980,9 @@ export async function createRepoForProject(params: {
   name: string;
   isPrivate: boolean;
 }): Promise<ProjectWorkspace> {
-  const project = getProjectRow(params.projectId);
-  const connection = getStoredGitHubConnection();
+  const userId = await requireCurrentUserId();
+  const project = getProjectRow(params.projectId, userId);
+  const connection = getStoredGitHubConnection(userId);
   if (!connection) {
     throw new Error("Connect GitHub first to create a repo from this project.");
   }
@@ -1968,7 +1991,7 @@ export async function createRepoForProject(params: {
     name: params.name,
     isPrivate: params.isPrivate,
     description: `Created from ${project.name} in MyMake.`,
-  });
+  }, userId);
 
   await bootstrapRepoSyncForNewRepo({
     projectId: params.projectId,
@@ -1995,9 +2018,12 @@ export async function pushProjectToGitHub(projectId: string): Promise<{
   workspace: ProjectWorkspace;
   summary: string;
 }> {
-  const project = getProjectRow(projectId);
+  const userId = await requireCurrentUserId();
+  const project = getProjectRow(projectId, userId);
   const binding = getProjectGitHubBinding(projectId);
-  const connection = getStoredGitHubConnection();
+  const connection = binding
+    ? getGitHubConnectionById(userId, binding.githubConnectionId)
+    : null;
   if (!binding || !connection) {
     throw new Error("Link this project to GitHub first.");
   }
@@ -2089,6 +2115,7 @@ export async function createProjectFromUpload(
   zipBuffer: Buffer,
 ): Promise<ProjectWorkspace> {
   await ensureStorageReady();
+  const userId = await requireCurrentUserId();
   const projectId = nanoid(10);
   const timestamp = nowIso();
   const projectPaths = await ensureProjectDirectories(projectId);
@@ -2125,12 +2152,13 @@ export async function createProjectFromUpload(
   getDb()
     .prepare(
       `INSERT INTO projects (
-        id, name, source_zip_path, extracted_path, package_manager, status,
+        id, owner_user_id, name, source_zip_path, extracted_path, package_manager, status,
         current_revision_id, manifest_hash, preview_port, last_opened_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       insertedProject.id,
+      userId,
       insertedProject.name,
       insertedProject.sourceZipPath,
       insertedProject.extractedPath,
@@ -2164,6 +2192,7 @@ export async function createProjectFromUpload(
       label: "Initial upload",
       source: "upload",
       summary: "Imported from uploaded zip archive.",
+      ownerUserId: userId,
     });
     const validationResult = await createValidationResultRecord({
       projectId,
@@ -2197,7 +2226,7 @@ export async function createProjectFromUpload(
 }
 
 export async function readProjectFile(projectId: string, relativePath: string) {
-  const project = getProjectRow(projectId);
+  const project = getProjectRow(projectId, await requireCurrentUserId());
   const absolutePath = resolveInsideRoot(project.extractedPath, relativePath);
   if (!isTextLikeFile(absolutePath)) {
     throw new Error("This file cannot be opened in the code editor.");
@@ -2214,8 +2243,9 @@ export async function saveProjectFile(
   relativePath: string,
   content: string,
 ): Promise<ProjectWorkspace> {
-  const project = getProjectRow(projectId);
-  await pruneRedoBranch(projectId);
+  const userId = await requireCurrentUserId();
+  const project = getProjectRow(projectId, userId);
+  await pruneRedoBranch(projectId, userId);
 
   const absolutePath = resolveInsideRoot(project.extractedPath, relativePath);
   const normalizedContent =
@@ -2239,6 +2269,7 @@ export async function saveProjectFile(
     label: `Saved ${path.basename(relativePath)}`,
     source: "manual",
     summary: `Updated ${relativePath}`,
+    ownerUserId: userId,
   });
 
   await maybeRefreshPreview(projectId, [relativePath]);
@@ -2269,6 +2300,7 @@ export async function saveAttachments(
   projectId: string,
   files: Array<{ filename: string; mimeType: string; data: Buffer }>,
 ): Promise<AttachmentRecord[]> {
+  getProjectRow(projectId, await requireCurrentUserId());
   const paths = await ensureProjectDirectories(projectId);
   const created: AttachmentRecord[] = [];
 
@@ -2485,7 +2517,8 @@ export async function applyAiEdit(
   changedFiles: Array<{ path: string; reason?: string }>;
   workspace: ProjectWorkspace;
 }> {
-  const project = getProjectRow(payload.projectId);
+  const userId = await requireCurrentUserId();
+  const project = getProjectRow(payload.projectId, userId);
   const runtime = requireRuntime(await detectProjectRuntime(project.extractedPath));
   await syncProjectKnowledgeAndKits(project, runtime);
   if (runtime === "static") {
@@ -2500,7 +2533,7 @@ export async function applyAiEdit(
     throw new Error("The selected revision is out of date. Refresh and try again.");
   }
 
-  await pruneRedoBranch(payload.projectId);
+  await pruneRedoBranch(payload.projectId, userId);
 
   const attachmentRows = payload.attachmentIds.length
     ? (getDb()
@@ -2884,6 +2917,7 @@ Fix the root cause before applying the edit. You may update related files, style
     label: payload.prompt.trim(),
     source: "ai",
     summary: aiResult.summary,
+    ownerUserId: userId,
   });
 
   const validationResult = await createValidationResultRecord({
@@ -2928,7 +2962,7 @@ Fix the root cause before applying the edit. You may update related files, style
     changedFiles: changedPaths,
     createdAt: revision.createdAt,
   });
-    await syncProjectKnowledgeAndKits(getProjectRow(payload.projectId), runtime);
+  await syncProjectKnowledgeAndKits(getProjectRow(payload.projectId, userId), runtime);
   return {
     summary: aiResult.summary,
     warnings: allWarnings,
@@ -2946,8 +2980,9 @@ Fix the root cause before applying the edit. You may update related files, style
 async function switchToRevision(
   projectId: string,
   targetRevision: RevisionRecord,
+  ownerUserId: string,
 ): Promise<ProjectWorkspace> {
-  const project = getProjectRow(projectId);
+  const project = getProjectRow(projectId, ownerUserId);
   const currentRevision = project.currentRevisionId
     ? getRevisionById(project.currentRevisionId)
     : null;
@@ -2977,7 +3012,7 @@ async function switchToRevision(
       )
       .run(targetRevision.id, restoredManifestHash, "ready", nowIso(), projectId);
     await syncProjectKnowledgeAndKits(
-      getProjectRow(projectId),
+      getProjectRow(projectId, ownerUserId),
       requireRuntime(await detectProjectRuntime(project.extractedPath)),
     );
 
@@ -3018,12 +3053,14 @@ export async function restoreProjectRevision(
   projectId: string,
   revisionId: string,
 ): Promise<ProjectWorkspace> {
+  const userId = await requireCurrentUserId();
+  getProjectRow(projectId, userId);
   const targetRevision = getRevisionById(revisionId);
   if (targetRevision.projectId !== projectId) {
     throw new Error("That checkpoint does not belong to this project.");
   }
 
-  const workspace = await switchToRevision(projectId, targetRevision);
+  const workspace = await switchToRevision(projectId, targetRevision, userId);
   const validationResult = await createValidationResultRecord({
     projectId,
     revisionId: targetRevision.id,
@@ -3047,7 +3084,8 @@ export async function restoreProjectRevision(
 }
 
 export async function undoProject(projectId: string): Promise<ProjectWorkspace> {
-  const project = getProjectRow(projectId);
+  const userId = await requireCurrentUserId();
+  const project = getProjectRow(projectId, userId);
   if (!project.currentRevisionId) {
     return getWorkspaceSnapshot(projectId, { ensurePreview: true });
   }
@@ -3069,7 +3107,7 @@ export async function undoProject(projectId: string): Promise<ProjectWorkspace> 
   }
 
   const targetRevision = mapRevisionRow(previousRow);
-  const workspace = await switchToRevision(projectId, targetRevision);
+  const workspace = await switchToRevision(projectId, targetRevision, userId);
   const validationResult = await createValidationResultRecord({
     projectId,
     revisionId: targetRevision.id,
@@ -3093,7 +3131,8 @@ export async function undoProject(projectId: string): Promise<ProjectWorkspace> 
 }
 
 export async function redoProject(projectId: string): Promise<ProjectWorkspace> {
-  const project = getProjectRow(projectId);
+  const userId = await requireCurrentUserId();
+  const project = getProjectRow(projectId, userId);
   if (!project.currentRevisionId) {
     return getWorkspaceSnapshot(projectId, { ensurePreview: true });
   }
@@ -3115,7 +3154,7 @@ export async function redoProject(projectId: string): Promise<ProjectWorkspace> 
   }
 
   const targetRevision = mapRevisionRow(nextRow);
-  const workspace = await switchToRevision(projectId, targetRevision);
+  const workspace = await switchToRevision(projectId, targetRevision, userId);
   const validationResult = await createValidationResultRecord({
     projectId,
     revisionId: targetRevision.id,
@@ -3139,7 +3178,7 @@ export async function redoProject(projectId: string): Promise<ProjectWorkspace> 
 }
 
 export async function createProjectExport(projectId: string): Promise<string> {
-  const project = getProjectRow(projectId);
+  const project = getProjectRow(projectId, await requireCurrentUserId());
   const outputPath = path.join(getProjectPaths(projectId).root, `export-${Date.now()}.zip`);
   await archiveDirectoryToFile(project.extractedPath, outputPath);
   return outputPath;

@@ -1,42 +1,97 @@
 "use client";
 
 import { ArrowRight, ShieldCheck } from "lucide-react";
+import { getAccessToken, getIdentityToken, usePrivy } from "@privy-io/react-auth";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export function AuthForm({ redirectTo }: { redirectTo: string }) {
   const router = useRouter();
-  const [passcode, setPasscode] = useState("");
+  const { ready, authenticated, user, login } = usePrivy();
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const attemptedSessionSyncRef = useRef(false);
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  const exchangePrivySession = useCallback(async () => {
     setIsSubmitting(true);
     setError(null);
 
     try {
+      const [accessToken, identityToken] = await Promise.all([
+        getAccessToken(),
+        getIdentityToken(),
+      ]);
+
+      if (!accessToken || !identityToken) {
+        throw new Error("Privy did not return a valid session yet. Please try again.");
+      }
+
       const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ passcode }),
+        body: JSON.stringify({ accessToken, identityToken }),
       });
 
       if (!response.ok) {
         const payload = (await response.json()) as { error?: string };
-        throw new Error(payload.error || "The passcode was incorrect.");
+        throw new Error(payload.error || "Could not start your MyMake session.");
       }
 
       router.replace(redirectTo);
       router.refresh();
     } catch (caughtError) {
+      attemptedSessionSyncRef.current = false;
       setError(caughtError instanceof Error ? caughtError.message : "Login failed.");
     } finally {
       setIsSubmitting(false);
     }
+  }, [redirectTo, router]);
+
+  useEffect(() => {
+    if (!ready || !authenticated || attemptedSessionSyncRef.current || isSubmitting) {
+      return;
+    }
+
+    attemptedSessionSyncRef.current = true;
+    void exchangePrivySession();
+  }, [authenticated, exchangePrivySession, isSubmitting, ready]);
+
+  function handleEnterStudio() {
+    setError(null);
+
+    if (!ready) {
+      return;
+    }
+
+    if (authenticated) {
+      attemptedSessionSyncRef.current = true;
+      void exchangePrivySession();
+      return;
+    }
+
+    login();
   }
+
+  const signedInLabel =
+    user?.linkedAccounts?.find(
+      (account) =>
+        (account.type === "email" && "address" in account && typeof account.address === "string") ||
+        ("email" in account && typeof account.email === "string") ||
+        ("username" in account && typeof account.username === "string"),
+    );
+
+  const signedInIdentity =
+    (signedInLabel &&
+      ("address" in signedInLabel && typeof signedInLabel.address === "string"
+        ? signedInLabel.address
+        : "email" in signedInLabel && typeof signedInLabel.email === "string"
+          ? signedInLabel.email
+          : "username" in signedInLabel && typeof signedInLabel.username === "string"
+            ? signedInLabel.username
+            : null)) ||
+    "your Privy account";
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(123,97,255,0.18),_transparent_32%),linear-gradient(180deg,_#090d16_0%,_#06080e_100%)] px-6 py-10 text-white">
@@ -45,25 +100,24 @@ export function AuthForm({ redirectTo }: { redirectTo: string }) {
           <section className="border-b border-white/8 px-8 py-10 xl:border-b-0 xl:border-r">
             <div className="inline-flex items-center gap-2 rounded-full border border-cyan-400/30 bg-cyan-400/10 px-3 py-1 text-xs uppercase tracking-[0.28em] text-cyan-200">
               <ShieldCheck className="h-4 w-4" />
-              Personal Workspace
+              Privy Workspace
             </div>
             <h1 className="mt-8 text-5xl font-semibold tracking-[-0.05em] text-white">
-              Unlock MyMake
+              Sign in to MyMake
             </h1>
             <p className="mt-4 max-w-xl text-lg leading-8 text-slate-300">
-              Upload a design zip, inspect the live preview, and let Claude rewrite your UI one
-              element at a time. This deployment stays behind a single passcode and keeps every
-              revision on the server.
+              Each user gets their own projects, revision history, attachments, preview state, and
+              GitHub connection. Your uploaded work stays scoped to your authenticated account.
             </p>
             <div className="mt-10 grid gap-4 text-sm text-slate-200/80">
               <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
                 Live preview is backed by a dedicated project runner for the active upload.
               </div>
               <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                Undo/redo and AI edits are stored as full project snapshots for safe rollback.
+                Checkpoints, AI edits, files, and attachments are now stored per Privy user.
               </div>
               <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                Reference images and files are attached directly to each AI editing request.
+                GitHub repo sync can now be tied to each user instead of a single shared session.
               </div>
             </div>
           </section>
@@ -71,42 +125,39 @@ export function AuthForm({ redirectTo }: { redirectTo: string }) {
           <section className="px-8 py-10">
             <div className="mx-auto max-w-md">
               <h2 className="text-2xl font-semibold tracking-[-0.03em] text-white">
-                Enter passcode
+                Continue with Privy
               </h2>
               <p className="mt-2 text-sm leading-7 text-slate-400">
-                The passcode is configured via `APP_PASSCODE`.
+                Use your email or any enabled Privy login method to open your personal MyMake
+                workspace.
               </p>
 
-              <form className="mt-10 space-y-5" onSubmit={handleSubmit}>
-                <label className="block">
-                  <span className="mb-2 block text-xs font-medium uppercase tracking-[0.22em] text-slate-400">
-                    Passcode
-                  </span>
-                  <input
-                    autoFocus
-                    className="w-full rounded-2xl border border-white/10 bg-black/30 px-5 py-4 text-base text-white outline-none transition focus:border-cyan-300/70 focus:bg-black/50"
-                    type="password"
-                    value={passcode}
-                    onChange={(event) => setPasscode(event.target.value)}
-                    placeholder="Your private MyMake passcode"
-                  />
-                </label>
+              {user ? (
+                <div className="mt-8 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-4 text-sm text-slate-200">
+                  Signed in as{" "}
+                  <span className="font-medium text-white">{signedInIdentity}</span>
+                </div>
+              ) : null}
 
-                {error ? (
-                  <p className="rounded-2xl border border-rose-400/30 bg-rose-400/10 px-4 py-3 text-sm text-rose-200">
-                    {error}
-                  </p>
-                ) : null}
+              {error ? (
+                <p className="mt-6 rounded-2xl border border-rose-400/30 bg-rose-400/10 px-4 py-3 text-sm text-rose-200">
+                  {error}
+                </p>
+              ) : null}
 
-                <button
-                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-[linear-gradient(135deg,_#3fb7ff,_#7c5cff)] px-5 py-4 text-sm font-semibold text-white shadow-[0_18px_50px_rgba(79,127,255,0.35)] transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-60"
-                  type="submit"
-                  disabled={isSubmitting}
-                >
-                  {isSubmitting ? "Unlocking..." : "Enter Studio"}
-                  <ArrowRight className="h-4 w-4" />
-                </button>
-              </form>
+              <button
+                className="mt-10 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-[linear-gradient(135deg,_#3fb7ff,_#7c5cff)] px-5 py-4 text-sm font-semibold text-white shadow-[0_18px_50px_rgba(79,127,255,0.35)] transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-60"
+                type="button"
+                disabled={!ready || isSubmitting}
+                onClick={handleEnterStudio}
+              >
+                {isSubmitting
+                  ? "Opening your workspace..."
+                  : authenticated
+                    ? "Continue to workspace"
+                    : "Sign in with Privy"}
+                <ArrowRight className="h-4 w-4" />
+              </button>
             </div>
           </section>
         </div>

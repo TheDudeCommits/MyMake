@@ -9,8 +9,18 @@ let database: Database.Database | null = null;
 const SCHEMA_SQL = `
   PRAGMA foreign_keys = ON;
 
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT,
+    display_name TEXT,
+    avatar_url TEXT,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
+    owner_user_id TEXT,
     name TEXT NOT NULL,
     source_zip_path TEXT NOT NULL,
     extracted_path TEXT NOT NULL,
@@ -20,7 +30,8 @@ const SCHEMA_SQL = `
     manifest_hash TEXT,
     preview_port INTEGER,
     last_opened_at TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS revisions (
@@ -118,12 +129,14 @@ const SCHEMA_SQL = `
 
   CREATE TABLE IF NOT EXISTS github_connections (
     id TEXT PRIMARY KEY,
+    owner_user_id TEXT,
     login TEXT NOT NULL,
     name TEXT,
     avatar_url TEXT,
     access_token TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS project_github_bindings (
@@ -144,6 +157,12 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_projects_last_opened_at
     ON projects(last_opened_at DESC);
 
+  CREATE INDEX IF NOT EXISTS idx_projects_owner_last_opened_at
+    ON projects(owner_user_id, last_opened_at DESC);
+
+  CREATE INDEX IF NOT EXISTS idx_users_email
+    ON users(email);
+
   CREATE INDEX IF NOT EXISTS idx_revisions_project_sequence
     ON revisions(project_id, sequence DESC);
 
@@ -161,6 +180,9 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_validation_results_project_created_at
     ON validation_results(project_id, created_at DESC);
+
+  CREATE INDEX IF NOT EXISTS idx_github_connections_owner_updated_at
+    ON github_connections(owner_user_id, updated_at DESC);
 
   CREATE INDEX IF NOT EXISTS idx_project_github_bindings_owner_repo
     ON project_github_bindings(owner, repo);
@@ -186,6 +208,8 @@ function ensureColumn(
 function runMigrations(db: Database.Database): void {
   ensureColumn(db, "projects", "last_opened_at", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "projects", "created_at", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "projects", "owner_user_id", "TEXT");
+  ensureColumn(db, "github_connections", "owner_user_id", "TEXT");
 }
 
 export function getDb(): Database.Database {

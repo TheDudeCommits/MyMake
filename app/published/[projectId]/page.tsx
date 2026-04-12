@@ -10,7 +10,10 @@ export default async function PublishedProjectPage({
   params: { projectId: string };
 }) {
   try {
-    const workspace = await getWorkspaceSnapshot(params.projectId, { ensurePreview: false });
+    const workspace = await getWorkspaceSnapshot(params.projectId, {
+      ensurePreview: false,
+      allowPublic: true,
+    });
 
     return (
       <main className="h-screen w-screen overflow-hidden bg-[#111216]">

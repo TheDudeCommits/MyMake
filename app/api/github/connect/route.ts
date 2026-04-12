@@ -2,10 +2,12 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { nanoid } from "nanoid";
 
+import { requireCurrentAppUser } from "@/lib/server/auth-next";
 import {
   buildGitHubAuthorizeUrl,
   GITHUB_REDIRECT_COOKIE_NAME,
   GITHUB_STATE_COOKIE_NAME,
+  GITHUB_USER_COOKIE_NAME,
   isGitHubConfigured,
 } from "@/lib/server/github";
 
@@ -19,6 +21,7 @@ export async function GET(request: Request) {
     );
   }
 
+  const user = await requireCurrentAppUser();
   const requestUrl = new URL(request.url);
   const state = nanoid(24);
   const redirectPath = requestUrl.searchParams.get("redirect") || "/";
@@ -36,6 +39,13 @@ export async function GET(request: Request) {
     maxAge: 60 * 10,
   });
   cookies().set(GITHUB_REDIRECT_COOKIE_NAME, redirectPath, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 60 * 10,
+  });
+  cookies().set(GITHUB_USER_COOKIE_NAME, user.id, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",

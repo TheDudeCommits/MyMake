@@ -7,9 +7,11 @@ import type { GitHubConnectionRecord, GitHubRepoSummary } from "@/lib/types";
 const GITHUB_API_BASE = "https://api.github.com";
 export const GITHUB_STATE_COOKIE_NAME = "mymake-github-oauth-state";
 export const GITHUB_REDIRECT_COOKIE_NAME = "mymake-github-oauth-redirect";
+export const GITHUB_USER_COOKIE_NAME = "mymake-github-oauth-user";
 
 interface StoredGitHubConnection {
   id: string;
+  ownerUserId: string;
   login: string;
   name: string | null;
   avatarUrl: string | null;
@@ -57,6 +59,7 @@ function mapConnectionRow(
 
   return {
     id: String(row.id),
+    ownerUserId: String(row.owner_user_id),
     login: String(row.login),
     name: row.name ? String(row.name) : null,
     avatarUrl: row.avatar_url ? String(row.avatar_url) : null,
@@ -66,21 +69,39 @@ function mapConnectionRow(
   };
 }
 
-export function getStoredGitHubConnection(): StoredGitHubConnection | null {
+export function getStoredGitHubConnection(userId: string): StoredGitHubConnection | null {
   const row = getDb()
     .prepare(
       `SELECT *
          FROM github_connections
+        WHERE owner_user_id = ?
         ORDER BY updated_at DESC
         LIMIT 1`,
     )
-    .get() as Record<string, unknown> | undefined;
+    .get(userId) as Record<string, unknown> | undefined;
 
   return mapConnectionRow(row);
 }
 
-export function getGitHubConnectionStatus(): GitHubConnectionRecord {
-  const connection = getStoredGitHubConnection();
+export function getGitHubConnectionById(
+  userId: string,
+  connectionId: string,
+): StoredGitHubConnection | null {
+  const row = getDb()
+    .prepare(
+      `SELECT *
+         FROM github_connections
+        WHERE id = ?
+          AND owner_user_id = ?
+        LIMIT 1`,
+    )
+    .get(connectionId, userId) as Record<string, unknown> | undefined;
+
+  return mapConnectionRow(row);
+}
+
+export function getGitHubConnectionStatus(userId: string | null): GitHubConnectionRecord {
+  const connection = userId ? getStoredGitHubConnection(userId) : null;
   return {
     configured: isGitHubConfigured(),
     connected: Boolean(connection),
@@ -101,9 +122,9 @@ function getGitHubHeaders(token: string): HeadersInit {
 
 async function githubFetch<T>(
   input: string,
-  init: RequestInit & { token?: string } = {},
+  init: RequestInit & { token?: string; userId?: string } = {},
 ): Promise<T> {
-  const token = init.token || getStoredGitHubConnection()?.accessToken;
+  const token = init.token || (init.userId ? getStoredGitHubConnection(init.userId)?.accessToken : null);
   if (!token) {
     throw new Error("Connect GitHub first to use repo sync.");
   }
@@ -189,26 +210,33 @@ export async function fetchGitHubUser(token: string): Promise<GitHubUser> {
   return (await response.json()) as GitHubUser;
 }
 
-export async function upsertGitHubConnection(token: string): Promise<StoredGitHubConnection> {
+export async function upsertGitHubConnection(
+  userId: string,
+  token: string,
+): Promise<StoredGitHubConnection> {
   const user = await fetchGitHubUser(token);
-  const existing = getStoredGitHubConnection();
+  const existing = getStoredGitHubConnection(userId);
   const createdAt = existing?.createdAt || nowIso();
   const updatedAt = nowIso();
   const id = existing?.id || nanoid(10);
 
   getDb()
-    .prepare("DELETE FROM github_connections")
-    .run();
+    .prepare(
+      `DELETE FROM github_connections
+        WHERE owner_user_id = ?`,
+    )
+    .run(userId);
   getDb()
     .prepare(
       `INSERT INTO github_connections (
-        id, login, name, avatar_url, access_token, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        id, owner_user_id, login, name, avatar_url, access_token, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, user.login, user.name, user.avatar_url, token, createdAt, updatedAt);
+    .run(id, userId, user.login, user.name, user.avatar_url, token, createdAt, updatedAt);
 
   return {
     id,
+    ownerUserId: userId,
     login: user.login,
     name: user.name,
     avatarUrl: user.avatar_url,
@@ -218,9 +246,10 @@ export async function upsertGitHubConnection(token: string): Promise<StoredGitHu
   };
 }
 
-export async function listGitHubRepos(): Promise<GitHubRepoSummary[]> {
+export async function listGitHubRepos(userId: string): Promise<GitHubRepoSummary[]> {
   const repositories = await githubFetch<GitHubRepositoryPayload[]>(
     "/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
+    { userId },
   );
 
   return repositories.map((repo) => ({
@@ -239,8 +268,11 @@ export async function listGitHubRepos(): Promise<GitHubRepoSummary[]> {
 export async function getGitHubRepo(
   owner: string,
   repo: string,
+  userId: string,
 ): Promise<GitHubRepoSummary> {
-  const repository = await githubFetch<GitHubRepositoryPayload>(`/repos/${owner}/${repo}`);
+  const repository = await githubFetch<GitHubRepositoryPayload>(`/repos/${owner}/${repo}`, {
+    userId,
+  });
   return {
     id: repository.id,
     owner: repository.owner.login,
@@ -254,13 +286,17 @@ export async function getGitHubRepo(
   };
 }
 
-export async function createGitHubRepo(params: {
-  name: string;
-  isPrivate: boolean;
-  description?: string | null;
-}): Promise<GitHubRepoSummary> {
+export async function createGitHubRepo(
+  params: {
+    name: string;
+    isPrivate: boolean;
+    description?: string | null;
+  },
+  userId: string,
+): Promise<GitHubRepoSummary> {
   const repository = await githubFetch<GitHubRepositoryPayload>("/user/repos", {
     method: "POST",
+    userId,
     headers: {
       "Content-Type": "application/json",
     },

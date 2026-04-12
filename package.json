@@ -13,7 +13,11 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.86.1",
+    "@heroicons/react": "^2.1.5",
     "@monaco-editor/react": "^4.7.0",
+    "@phosphor-icons/webcomponents": "^2.1.5",
+    "@privy-io/node": "^0.14.0",
+    "@privy-io/react-auth": "^3.21.2",
     "adm-zip": "^0.5.17",
     "archiver": "^7.0.1",
     "better-sqlite3": "^12.8.0",
@@ -29,6 +33,7 @@
     "react-dom": "^18",
     "tsx": "^4.21.0",
     "unzipper": "^0.12.3",
+    "viem": "^2.47.12",
     "zod": "^4.3.6"
   },
   "devDependencies": {

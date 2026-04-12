@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { DEFAULT_AI_MODEL_KEY, listAiModels } from "@/lib/server/ai";
-import { getGitHubConnectionStatus } from "@/lib/server/github";
-import { applyAiEdit, getWorkspaceSnapshot, listProjects } from "@/lib/server/project-service";
+import { applyAiEdit, getDashboardSnapshot, getWorkspaceSnapshot } from "@/lib/server/project-service";
 
 export const runtime = "nodejs";
 
@@ -59,14 +57,11 @@ export async function POST(
       ...body,
       projectId: params.projectId,
     });
+    const snapshot = await getDashboardSnapshot(params.projectId);
 
     return NextResponse.json({
-      projects: await listProjects(),
-      currentProjectId: params.projectId,
+      ...snapshot,
       currentProject: result.workspace,
-      githubConnection: getGitHubConnectionStatus(),
-      aiModels: listAiModels(),
-      defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
       ai: {
         summary: result.summary,
         warnings: result.warnings,

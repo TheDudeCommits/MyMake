@@ -5,7 +5,7 @@ import { createProxyMiddleware, responseInterceptor } from "http-proxy-middlewar
 import type { IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
 
-import { isAuthorizedCookieValue } from "@/lib/server/auth";
+import { doesUserOwnProject, readSessionCookieValue } from "@/lib/server/auth";
 import { getEnv } from "@/lib/server/env";
 import {
   buildPreviewBootstrapScript,
@@ -274,9 +274,16 @@ function isHtmlRequest(request: Request): boolean {
 }
 
 async function previewAuthGuard(req: Request, res: Response, nextFn: NextFunction) {
-  const sessionValue = getCookieValue(req.headers.cookie, "mymake-session");
-  if (!(await isAuthorizedCookieValue(sessionValue))) {
+  const session = readSessionCookieValue(getCookieValue(req.headers.cookie, "mymake-session"));
+  const projectId = resolvePreviewProjectId(req);
+
+  if (!session) {
     res.status(401).send("Unauthorized preview request.");
+    return;
+  }
+
+  if (!projectId || !doesUserOwnProject(projectId, session.userId)) {
+    res.status(403).send("You do not have access to this preview.");
     return;
   }
 
@@ -501,6 +508,19 @@ app.prepare().then(() => {
       return;
     }
 
+    if (!isPublicPreviewLocation(req.headers.referer)) {
+      const session = readSessionCookieValue(getCookieValue(req.headers.cookie, "mymake-session"));
+      if (!session) {
+        res.status(401).send("Unauthorized preview request.");
+        return;
+      }
+
+      if (!doesUserOwnProject(fallbackProjectId, session.userId)) {
+        res.status(403).send("You do not have access to this preview.");
+        return;
+      }
+    }
+
     req.mymakeProjectId = fallbackProjectId;
     await dispatchPreviewProxy(req, res, nextFn);
   });
@@ -528,10 +548,16 @@ app.prepare().then(() => {
       return;
     }
 
-    const sessionValue = getCookieValue(req.headers.cookie, "mymake-session");
+    const session = readSessionCookieValue(getCookieValue(req.headers.cookie, "mymake-session"));
     const isPublicRequest =
       isPublicPreviewPath(req.url || "") || isPublicPreviewLocation(req.headers.referer);
-    if (!isPublicRequest && !(await isAuthorizedCookieValue(sessionValue))) {
+    const sessionUserId = session?.userId ?? null;
+    if (!isPublicRequest && !session) {
+      socket.destroy();
+      return;
+    }
+
+    if (!isPublicRequest && (!projectId || !sessionUserId || !doesUserOwnProject(projectId, sessionUserId))) {
       socket.destroy();
       return;
     }

@@ -1,14 +1,23 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { isAuthorizedCookieValue } from "@/lib/server/auth";
-
 const EXCLUDED_PREFIXES = [
   "/_next",
   "/favicon.ico",
   "/auth",
   "/published",
   "/api/auth/login",
+  "/api/auth/logout",
+  "/api/github/callback",
 ];
+
+function hasSessionCookie(value?: string | null): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const separatorIndex = value.lastIndexOf(".");
+  return separatorIndex > 0;
+}
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -18,7 +27,7 @@ export async function middleware(request: NextRequest) {
   }
 
   const sessionValue = request.cookies.get("mymake-session")?.value;
-  if (await isAuthorizedCookieValue(sessionValue)) {
+  if (hasSessionCookie(sessionValue)) {
     return NextResponse.next();
   }
 

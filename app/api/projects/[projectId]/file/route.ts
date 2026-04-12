@@ -1,10 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { DEFAULT_AI_MODEL_KEY, listAiModels } from "@/lib/server/ai";
-import { getGitHubConnectionStatus } from "@/lib/server/github";
 import {
-  listProjects,
+  getDashboardSnapshot,
   readProjectFile,
   saveProjectFile,
 } from "@/lib/server/project-service";
@@ -39,17 +37,14 @@ export async function GET(
 export async function PUT(
   request: Request,
   { params }: { params: { projectId: string } },
-) {
+ ) {
   try {
     const body = updateSchema.parse(await request.json());
     const workspace = await saveProjectFile(params.projectId, body.path, body.content);
+    const snapshot = await getDashboardSnapshot(params.projectId);
     return NextResponse.json({
-      projects: await listProjects(),
-      currentProjectId: params.projectId,
+      ...snapshot,
       currentProject: workspace,
-      githubConnection: getGitHubConnectionStatus(),
-      aiModels: listAiModels(),
-      defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
     });
   } catch (error) {
     return NextResponse.json(
