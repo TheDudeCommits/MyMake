@@ -1,37 +1,120 @@
 "use client";
 
 import { ArrowRight, ShieldCheck } from "lucide-react";
-import { getAccessToken, getIdentityToken, usePrivy } from "@privy-io/react-auth";
-import { useRouter } from "next/navigation";
+import { getAccessToken, usePrivy } from "@privy-io/react-auth";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export function AuthForm({ redirectTo }: { redirectTo: string }) {
-  const router = useRouter();
   const { ready, authenticated, user, login } = usePrivy();
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const attemptedSessionSyncRef = useRef(false);
+
+  function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        reject(new Error(message));
+      }, timeoutMs);
+
+      promise
+        .then((value) => {
+          window.clearTimeout(timeoutId);
+          resolve(value);
+        })
+        .catch((reason) => {
+          window.clearTimeout(timeoutId);
+          reject(reason);
+        });
+    });
+  }
+
+  const buildPrivyProfile = useCallback(() => {
+    if (!user) {
+      return null;
+    }
+
+    const linkedAccounts = user.linkedAccounts || [];
+    const emailAccount = linkedAccounts.find(
+      (account) =>
+        (account.type === "email" &&
+          "address" in account &&
+          typeof account.address === "string" &&
+          account.address) ||
+        ("email" in account && typeof account.email === "string" && account.email),
+    );
+    const namedAccount = linkedAccounts.find(
+      (account) =>
+        ("name" in account && typeof account.name === "string" && account.name.trim()) ||
+        ("username" in account &&
+          typeof account.username === "string" &&
+          account.username.trim()),
+    );
+    const avatarAccount = linkedAccounts.find(
+      (account) =>
+        "profilePictureUrl" in account &&
+        typeof account.profilePictureUrl === "string" &&
+        account.profilePictureUrl,
+    );
+
+    const email =
+      emailAccount &&
+      ("address" in emailAccount && typeof emailAccount.address === "string"
+        ? emailAccount.address
+        : "email" in emailAccount && typeof emailAccount.email === "string"
+          ? emailAccount.email
+          : null);
+    const displayName =
+      namedAccount &&
+      ("name" in namedAccount && typeof namedAccount.name === "string" && namedAccount.name.trim()
+        ? namedAccount.name.trim()
+        : "username" in namedAccount && typeof namedAccount.username === "string"
+          ? namedAccount.username.trim()
+          : null);
+    const avatarUrl =
+      avatarAccount &&
+      "profilePictureUrl" in avatarAccount &&
+      typeof avatarAccount.profilePictureUrl === "string"
+        ? avatarAccount.profilePictureUrl
+        : null;
+
+    return {
+      userId: user.id,
+      email: email || null,
+      displayName: displayName || null,
+      avatarUrl: avatarUrl || null,
+    };
+  }, [user]);
 
   const exchangePrivySession = useCallback(async () => {
     setIsSubmitting(true);
     setError(null);
 
     try {
-      const [accessToken, identityToken] = await Promise.all([
+      const accessToken = await withTimeout(
         getAccessToken(),
-        getIdentityToken(),
-      ]);
+        12000,
+        "Privy took too long to return an access token. Please try again.",
+      );
+      const profile = buildPrivyProfile();
 
-      if (!accessToken || !identityToken) {
+      if (!accessToken) {
         throw new Error("Privy did not return a valid session yet. Please try again.");
       }
+
+      const controller = new AbortController();
+      const abortTimeout = window.setTimeout(() => {
+        controller.abort();
+      }, 15000);
 
       const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ accessToken, identityToken }),
+        body: JSON.stringify({ accessToken, profile }),
+        signal: controller.signal,
+      }).finally(() => {
+        window.clearTimeout(abortTimeout);
       });
 
       if (!response.ok) {
@@ -39,15 +122,23 @@ export function AuthForm({ redirectTo }: { redirectTo: string }) {
         throw new Error(payload.error || "Could not start your MyMake session.");
       }
 
-      router.replace(redirectTo);
-      router.refresh();
+      window.location.replace(redirectTo);
     } catch (caughtError) {
       attemptedSessionSyncRef.current = false;
-      setError(caughtError instanceof Error ? caughtError.message : "Login failed.");
+      if (
+        typeof caughtError === "object" &&
+        caughtError &&
+        "name" in caughtError &&
+        caughtError.name === "AbortError"
+      ) {
+        setError("MyMake took too long to open your workspace. Please try again.");
+      } else {
+        setError(caughtError instanceof Error ? caughtError.message : "Login failed.");
+      }
     } finally {
       setIsSubmitting(false);
     }
-  }, [redirectTo, router]);
+  }, [buildPrivyProfile, redirectTo]);
 
   useEffect(() => {
     if (!ready || !authenticated || attemptedSessionSyncRef.current || isSubmitting) {

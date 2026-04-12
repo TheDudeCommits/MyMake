@@ -12,6 +12,13 @@ const SESSION_VERSION = 2;
 export const SESSION_COOKIE_NAME = "mymake-session";
 export const SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
 
+interface PrivyProfileInput {
+  userId?: string | null;
+  email?: string | null;
+  displayName?: string | null;
+  avatarUrl?: string | null;
+}
+
 export interface AppSessionRecord {
   version: number;
   userId: string;
@@ -249,20 +256,33 @@ export function doesUserOwnProject(projectId: string, userId: string): boolean {
 
 export async function upsertAppUserFromPrivyTokens(params: {
   accessToken: string;
-  identityToken: string;
+  identityToken?: string | null;
+  profile?: PrivyProfileInput | null;
 }): Promise<AppUserRecord> {
   const client = getPrivyClient();
   const accessPayload = await client.utils().auth().verifyAccessToken(params.accessToken);
-  const privyUser = await client.users().get({ id_token: params.identityToken });
+  let privyUser: PrivyUser | null = null;
 
-  if (privyUser.id !== accessPayload.user_id) {
+  if (params.identityToken) {
+    privyUser = await client.users().get({ id_token: params.identityToken });
+
+    if (privyUser.id !== accessPayload.user_id) {
+      throw new Error("Privy session mismatch. Please sign in again.");
+    }
+  }
+
+  if (params.profile?.userId && params.profile.userId !== accessPayload.user_id) {
     throw new Error("Privy session mismatch. Please sign in again.");
   }
 
-  const email = extractEmail(privyUser);
-  const displayName = extractDisplayName(privyUser, email);
-  const avatarUrl = extractAvatarUrl(privyUser);
-  const existingUser = getAppUserById(privyUser.id);
+  const email = privyUser ? extractEmail(privyUser) : params.profile?.email?.trim() || null;
+  const displayName = privyUser
+    ? extractDisplayName(privyUser, email)
+    : params.profile?.displayName?.trim() || (email ? email.split("@")[0] || email : null);
+  const avatarUrl = privyUser
+    ? extractAvatarUrl(privyUser)
+    : params.profile?.avatarUrl?.trim() || null;
+  const existingUser = getAppUserById(accessPayload.user_id);
   const createdAt = existingUser?.createdAt || nowIso();
   const lastSeenAt = nowIso();
 
@@ -277,9 +297,9 @@ export async function upsertAppUserFromPrivyTokens(params: {
         avatar_url = excluded.avatar_url,
         last_seen_at = excluded.last_seen_at`,
     )
-    .run(privyUser.id, email, displayName, avatarUrl, createdAt, lastSeenAt);
+    .run(accessPayload.user_id, email, displayName, avatarUrl, createdAt, lastSeenAt);
 
-  const appUser = getAppUserById(privyUser.id);
+  const appUser = getAppUserById(accessPayload.user_id);
   if (!appUser) {
     throw new Error("Could not create the MyMake user record.");
   }
