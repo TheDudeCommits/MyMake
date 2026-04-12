@@ -153,7 +153,9 @@ const SCHEMA_SQL = `
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
     FOREIGN KEY (github_connection_id) REFERENCES github_connections(id) ON DELETE CASCADE
   );
+`;
 
+const INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS idx_projects_last_opened_at
     ON projects(last_opened_at DESC);
 
@@ -224,6 +226,7 @@ export function getDb(): Database.Database {
   database.pragma("journal_mode = WAL");
   database.exec(SCHEMA_SQL);
   runMigrations(database);
+  database.exec(INDEX_SQL);
 
   return database;
 }
