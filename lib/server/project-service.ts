@@ -74,6 +74,7 @@ import {
 import type {
   AiEditRequestPayload,
   AttachmentRecord,
+  AnthropicAttachment,
   ContextSnapshotRecord,
   ConversationTurnRecord,
   DashboardSnapshot,
@@ -246,6 +247,10 @@ function mapConversationTurnRow(row: Record<string, unknown>): ConversationTurnR
     selectionTarget: safeParseJson<SelectionTarget | null>(row.selection_target_json, null),
     changedFiles: safeParseJson(row.changed_files_json, []),
     warnings: safeParseJson(row.warnings_json, []),
+    validationDetails: safeParseJson(row.validation_details_json, []),
+    rawProviderOutput: row.validation_raw_provider_output
+      ? String(row.validation_raw_provider_output)
+      : null,
     contextSnapshotId: row.context_snapshot_id ? String(row.context_snapshot_id) : null,
     validationResultId: row.validation_result_id ? String(row.validation_result_id) : null,
     createdAt: String(row.created_at),
@@ -303,10 +308,14 @@ function getAttachmentRows(projectId: string): AttachmentRecord[] {
 function getConversationTurns(projectId: string): ConversationTurnRecord[] {
   const rows = getDb()
     .prepare(
-      `SELECT *
+      `SELECT conversation_turns.*,
+              validation_results.details_json AS validation_details_json,
+              validation_results.raw_provider_output AS validation_raw_provider_output
          FROM conversation_turns
-        WHERE project_id = ?
-        ORDER BY created_at ASC`,
+         LEFT JOIN validation_results
+           ON validation_results.id = conversation_turns.validation_result_id
+        WHERE conversation_turns.project_id = ?
+        ORDER BY conversation_turns.created_at ASC`,
     )
     .all(projectId) as Record<string, unknown>[];
 
@@ -708,6 +717,11 @@ function promptRequestsHideSelection(prompt: string): boolean {
   );
 }
 
+function promptRequestsAttachmentReplacement(prompt: string): boolean {
+  const normalized = normalizePrompt(prompt).toLowerCase();
+  return /\b(attached file|attached image|attachment|reference image)\b/.test(normalized);
+}
+
 function extractRequestedTextChange(
   prompt: string,
   selection: SelectionPayload | null,
@@ -775,6 +789,8 @@ async function tryApplyStaticSelectionFallback(params: {
   projectDir: string;
   prompt: string;
   selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  attachments: AnthropicAttachment[];
 }): Promise<
   | {
       summary: string;
@@ -785,6 +801,47 @@ async function tryApplyStaticSelectionFallback(params: {
 > {
   if (!params.selection) {
     return null;
+  }
+
+  if (promptRequestsAttachmentReplacement(params.prompt)) {
+    const imageAttachment = params.attachments.find((attachment) =>
+      attachment.mimeType.startsWith("image/"),
+    );
+    if (!imageAttachment) {
+      throw new Error("Attach an image file first, then retry the replacement.");
+    }
+
+    const target = buildExactSelectedOverrideTarget(params.selection);
+    const isImageTarget = Boolean(
+      params.selection.tagName === "img" ||
+        params.selection.src ||
+        params.selectionTarget?.editableCapabilities.some((item) => item.key === "image"),
+    );
+
+    if (!isImageTarget || !target) {
+      throw new Error(
+        "The selected layer does not look like an image or logo. Click the exact image/logo layer before replacing it with an attached file.",
+      );
+    }
+
+    const nextConfig = await appendElementOverride(params.projectDir, {
+      ...target,
+      src: `data:${imageAttachment.mimeType};base64,${imageAttachment.data.toString("base64")}`,
+      alt: path.parse(imageAttachment.filename).name,
+      clearSrcset: true,
+    });
+
+    return {
+      summary: `Replaced the selected image with ${imageAttachment.filename}.`,
+      warnings: [],
+      changedFiles: [
+        {
+          path: OVERRIDES_CONFIG_PATH,
+          content: nextConfig,
+          reason: "Replace the selected image/logo with the attached reference image.",
+        },
+      ],
+    };
   }
 
   if (promptRequestsHideSelection(params.prompt)) {
@@ -1232,6 +1289,8 @@ async function createConversationTurn(params: {
     selectionTarget: params.selectionTarget || null,
     changedFiles: params.changedFiles || [],
     warnings: params.warnings || [],
+    validationDetails: [],
+    rawProviderOutput: null,
     contextSnapshotId: params.contextSnapshotId || null,
     validationResultId: params.validationResultId || null,
     createdAt: nowIso(),
@@ -2038,11 +2097,18 @@ export async function applyAiEdit(
   let changedFiles: Array<{ path: string; content: string; reason?: string }>;
   const canUseStaticSelectionFallback =
     runtime === "static" && hasStaticEditableOverrides(projectFiles);
+  const requiresDeterministicStaticAttachmentSwap =
+    canUseStaticSelectionFallback &&
+    promptRequestsAttachmentReplacement(payload.prompt) &&
+    attachments.some((attachment) => attachment.mimeType.startsWith("image/"));
   const strategyQueue = uniqueStrings(
     [
+      requiresDeterministicStaticAttachmentSwap ? "static-override" : "",
       editPlan.strategy,
       editPlan.strategy !== "patch" && effectiveCurrentFilePath ? "patch" : "",
-      canUseStaticSelectionFallback ? "static-override" : "",
+      canUseStaticSelectionFallback && !requiresDeterministicStaticAttachmentSwap
+        ? "static-override"
+        : "",
     ].filter(Boolean),
   ) as EditPlan["strategy"][];
 
@@ -2078,6 +2144,8 @@ export async function applyAiEdit(
           projectDir: project.extractedPath,
           prompt: payload.prompt,
           selection: payload.selection,
+          selectionTarget,
+          attachments,
         });
         if (!staticResult) {
           throw new Error("Static override mode could not resolve this change.");

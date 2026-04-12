@@ -201,6 +201,8 @@ export interface ConversationTurnRecord {
   selectionTarget: SelectionTarget | null;
   changedFiles: TurnChangedFile[];
   warnings: string[];
+  validationDetails: string[];
+  rawProviderOutput: string | null;
   contextSnapshotId: string | null;
   validationResultId: string | null;
   createdAt: string;

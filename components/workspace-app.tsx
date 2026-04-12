@@ -97,6 +97,21 @@ type SnapshotResponse = DashboardSnapshot & {
   };
 };
 
+class RequestError extends Error {
+  details: string[];
+  rawProviderOutput: string | null;
+
+  constructor(
+    message: string,
+    options?: { details?: string[]; rawProviderOutput?: string | null },
+  ) {
+    super(message);
+    this.name = "RequestError";
+    this.details = options?.details || [];
+    this.rawProviderOutput = options?.rawProviderOutput || null;
+  }
+}
+
 function clsx(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
@@ -771,6 +786,10 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([]);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [composerErrorDetails, setComposerErrorDetails] = useState<string[]>([]);
+  const [composerErrorRawOutput, setComposerErrorRawOutput] = useState<string | null>(null);
+  const [isComposerNoticeExpanded, setIsComposerNoticeExpanded] = useState(false);
+  const [expandedTurnIds, setExpandedTurnIds] = useState<string[]>([]);
   const [isPreviewFrameReady, setIsPreviewFrameReady] = useState(false);
   const [isPreviewSlow, setIsPreviewSlow] = useState(false);
 
@@ -892,6 +911,8 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     setSelectedAttachmentIds([]);
     setSelectedElement(null);
     setCurrentRoute("/");
+    setExpandedTurnIds([]);
+    clearComposerDiagnostics();
   }, [currentProject?.project.id]);
 
   useEffect(() => {
@@ -921,6 +942,35 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     window.addEventListener("mousedown", handlePointerDown);
     return () => window.removeEventListener("mousedown", handlePointerDown);
   }, []);
+
+  function clearComposerDiagnostics() {
+    setComposerErrorDetails([]);
+    setComposerErrorRawOutput(null);
+    setIsComposerNoticeExpanded(false);
+  }
+
+  function recordComposerError(caughtError: unknown, fallbackMessage: string) {
+    if (caughtError instanceof RequestError) {
+      setError(caughtError.message);
+      setComposerErrorDetails(caughtError.details);
+      setComposerErrorRawOutput(caughtError.rawProviderOutput);
+      setIsComposerNoticeExpanded(Boolean(caughtError.details.length || caughtError.rawProviderOutput));
+      return;
+    }
+
+    setError(caughtError instanceof Error ? caughtError.message : fallbackMessage);
+    setComposerErrorDetails([]);
+    setComposerErrorRawOutput(null);
+    setIsComposerNoticeExpanded(false);
+  }
+
+  function toggleTurnExpansion(turnId: string) {
+    setExpandedTurnIds((previous) =>
+      previous.includes(turnId)
+        ? previous.filter((item) => item !== turnId)
+        : [...previous, turnId],
+    );
+  }
 
   useEffect(() => {
     if (!previewIdentity) {
@@ -1019,9 +1069,17 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   }, [currentProject, isPicking]);
 
   async function readJsonResponse<T>(response: Response): Promise<T> {
-    const payload = (await response.json()) as T & { error?: string };
+    const payload = (await response.json()) as T & {
+      error?: string;
+      details?: string[];
+      rawProviderOutput?: string | null;
+    };
     if (!response.ok) {
-      throw new Error((payload as { error?: string }).error || "Request failed.");
+      throw new RequestError((payload as { error?: string }).error || "Request failed.", {
+        details: Array.isArray(payload.details) ? payload.details : [],
+        rawProviderOutput:
+          typeof payload.rawProviderOutput === "string" ? payload.rawProviderOutput : null,
+      });
     }
 
     return payload;
@@ -1042,6 +1100,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     setSnapshot(nextSnapshot);
     syncBrowserLocation(nextSnapshot.currentProjectId);
     setError(null);
+    clearComposerDiagnostics();
     if (nextSnapshot.ai?.summary) {
       setFeedback(nextSnapshot.ai.summary);
     }
@@ -1061,6 +1120,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   async function handleProjectUpload(file: File) {
     setIsUploading(true);
     setError(null);
+    clearComposerDiagnostics();
     setFeedback("Importing project, installing dependencies, and starting the preview...");
 
     try {
@@ -1086,6 +1146,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     }
 
     setFeedback("Loading project workspace...");
+    clearComposerDiagnostics();
     try {
       await refreshProject(projectId);
     } catch (caughtError) {
@@ -1101,6 +1162,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     try {
       setError(null);
+      clearComposerDiagnostics();
       setFeedback(`Removing ${targetProject.name}...`);
       const response = await fetch(`/api/projects/${targetProject.id}`, {
         method: "DELETE",
@@ -1146,6 +1208,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     setIsSaving(true);
     setError(null);
+    clearComposerDiagnostics();
 
     try {
       const response = await fetch(`/api/projects/${currentProject.project.id}/file`, {
@@ -1216,12 +1279,13 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     }
 
     if (!selectedAiModel?.enabled) {
-      setError("The selected AI model is not configured yet.");
+      recordComposerError(new Error("The selected AI model is not configured yet."), "The selected AI model is not configured yet.");
       return;
     }
 
     setIsRunningAi(true);
     setError(null);
+    clearComposerDiagnostics();
     setFeedback(`${selectedAiModel.label} is updating the selected UI and refreshing the preview...`);
 
     try {
@@ -1244,7 +1308,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       applySnapshot(data);
       setPrompt("");
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "AI edit failed.");
+      recordComposerError(caughtError, "AI edit failed.");
     } finally {
       setIsRunningAi(false);
     }
@@ -1257,6 +1321,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     try {
       setError(null);
+      clearComposerDiagnostics();
       setFeedback(action === "undo" ? "Restoring the previous checkpoint..." : "Restoring the next checkpoint...");
       const response = await fetch(`/api/projects/${currentProject.project.id}/history`, {
         method: "POST",
@@ -1282,6 +1347,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     try {
       setError(null);
+      clearComposerDiagnostics();
       setFeedback(`Restoring ${checkpointLabel(revision)}...`);
       const response = await fetch(`/api/projects/${currentProject.project.id}/history`, {
         method: "POST",
@@ -1321,6 +1387,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     setIsShareMenuOpen(false);
     setFeedback(null);
     setError(null);
+    clearComposerDiagnostics();
     syncBrowserLocation(null);
   }
 
@@ -1383,6 +1450,12 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       selectedAiModel?.enabled,
   );
   const composerNotice = error || feedback;
+  const hasComposerDiagnostics = Boolean(
+    error &&
+      (composerErrorDetails.length ||
+        composerErrorRawOutput ||
+        (composerNotice && composerNotice.length > 180)),
+  );
   const showPreviewOverlay = Boolean(currentProject && (!isPreviewFrameReady || isPreviewStarting));
   const sharedInputs = (
     <>
@@ -1702,6 +1775,12 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                             linkedRevision &&
                               currentProject.project.currentRevisionId === linkedRevision.id,
                           );
+                        const hasTurnDiagnostics = Boolean(
+                          turn.warnings.length ||
+                            turn.validationDetails.length ||
+                            turn.rawProviderOutput,
+                        );
+                        const isTurnExpanded = expandedTurnIds.includes(turn.id);
 
                         return (
                           <article key={turn.id} className="group space-y-2">
@@ -1778,6 +1857,66 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                                   ))}
                                 </div>
                               ) : null}
+                              {hasTurnDiagnostics ? (
+                                <div className="mt-3 border-t border-white/[0.08] pt-3">
+                                  <button
+                                    className="flex w-full items-center justify-between gap-3 text-left text-[11px] uppercase tracking-[0.16em] text-slate-400 transition hover:text-white"
+                                    type="button"
+                                    onClick={() => toggleTurnExpansion(turn.id)}
+                                  >
+                                    <span>
+                                      {isTurnExpanded ? "Hide details" : "Show details"}
+                                    </span>
+                                    <ChevronDown
+                                      className={clsx(
+                                        "h-3.5 w-3.5 transition",
+                                        isTurnExpanded && "rotate-180",
+                                      )}
+                                    />
+                                  </button>
+
+                                  {isTurnExpanded ? (
+                                    <div className="mt-3 space-y-3 text-xs leading-5 text-slate-300">
+                                      {turn.warnings.length ? (
+                                        <div>
+                                          <p className="mb-1 text-[10px] uppercase tracking-[0.16em] text-amber-200">
+                                            Warnings
+                                          </p>
+                                          <ul className="space-y-1 text-amber-100/90">
+                                            {turn.warnings.map((warning, index) => (
+                                              <li key={`${turn.id}-warning-${index}`}>• {warning}</li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      ) : null}
+
+                                      {turn.validationDetails.length ? (
+                                        <div>
+                                          <p className="mb-1 text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                                            Validation details
+                                          </p>
+                                          <ul className="space-y-1">
+                                            {turn.validationDetails.map((detail, index) => (
+                                              <li key={`${turn.id}-detail-${index}`}>• {detail}</li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      ) : null}
+
+                                      {turn.rawProviderOutput ? (
+                                        <div>
+                                          <p className="mb-1 text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                                            Model output
+                                          </p>
+                                          <pre className="max-h-48 overflow-auto rounded-[12px] border border-white/[0.08] bg-[#262628] p-3 whitespace-pre-wrap break-words text-[11px] leading-5 text-slate-300">
+                                            {turn.rawProviderOutput}
+                                          </pre>
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : null}
                             </div>
                             ) : null}
                           </article>
@@ -1823,7 +1962,64 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                       : "border-emerald-300/15 bg-emerald-300/10 text-emerald-100",
                   )}
                 >
-                  <p className="line-clamp-2">{composerNotice}</p>
+                  <button
+                    className={clsx(
+                      "flex w-full items-start justify-between gap-3 text-left",
+                      hasComposerDiagnostics && "cursor-pointer",
+                    )}
+                    type="button"
+                    onClick={() => {
+                      if (hasComposerDiagnostics) {
+                        setIsComposerNoticeExpanded((value) => !value);
+                      }
+                    }}
+                  >
+                    <span
+                      className={clsx(
+                        "min-w-0",
+                        hasComposerDiagnostics && !isComposerNoticeExpanded && "line-clamp-2",
+                        isComposerNoticeExpanded && "whitespace-pre-wrap break-words",
+                      )}
+                    >
+                      {composerNotice}
+                    </span>
+                    {hasComposerDiagnostics ? (
+                      <ChevronDown
+                        className={clsx(
+                          "mt-0.5 h-3.5 w-3.5 shrink-0 transition",
+                          isComposerNoticeExpanded && "rotate-180",
+                        )}
+                      />
+                    ) : null}
+                  </button>
+
+                  {hasComposerDiagnostics && isComposerNoticeExpanded ? (
+                    <div className="mt-3 space-y-3 border-t border-white/10 pt-3 text-[11px] leading-5">
+                      {composerErrorDetails.length ? (
+                        <div>
+                          <p className="mb-1 uppercase tracking-[0.16em] text-rose-100/70">
+                            Details
+                          </p>
+                          <ul className="space-y-1">
+                            {composerErrorDetails.map((detail, index) => (
+                              <li key={`composer-detail-${index}`}>• {detail}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+
+                      {composerErrorRawOutput ? (
+                        <div>
+                          <p className="mb-1 uppercase tracking-[0.16em] text-rose-100/70">
+                            Model output
+                          </p>
+                          <pre className="max-h-52 overflow-auto rounded-[12px] border border-white/[0.08] bg-black/20 p-3 whitespace-pre-wrap break-words text-[11px] leading-5 text-rose-50/90">
+                            {composerErrorRawOutput}
+                          </pre>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 
