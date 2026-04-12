@@ -3,17 +3,26 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import vm from "node:vm";
+import os from "node:os";
 
 import { nanoid } from "nanoid";
 
 import {
   DEFAULT_AI_MODEL_KEY,
+  isCodexModel,
   listAiModels,
   requestAiEdit,
   requestAiPatchEdit,
 } from "@/lib/server/ai";
 import { getDb } from "@/lib/server/db";
 import { getEnv } from "@/lib/server/env";
+import {
+  createGitHubRepo,
+  getGitHubConnectionStatus,
+  getGitHubRepo,
+  getStoredGitHubConnection,
+  listGitHubRepos,
+} from "@/lib/server/github";
 import {
   buildDesignValidation,
   buildEditPlan,
@@ -30,6 +39,7 @@ import {
   isTextLikeFile,
   listProjectFiles,
   resolveInsideRoot,
+  shouldIgnoreEntry,
   toPosixPath,
 } from "@/lib/server/path-utils";
 import {
@@ -64,6 +74,7 @@ import {
 } from "@/lib/server/static-overrides";
 import {
   archiveDirectoryToFile,
+  clearDirectoryExcept,
   createRevisionSnapshot,
   ensureProjectDirectories,
   ensureStorageReady,
@@ -80,9 +91,11 @@ import type {
   DashboardSnapshot,
   EditMode,
   EditPlan,
+  GitHubRepoSummary,
   MakeKitRecord,
   PackageManager,
   ProjectRecord,
+  ProjectGitHubBindingRecord,
   ProjectRuntime,
   ProjectWorkspace,
   RevisionRecord,
@@ -232,6 +245,22 @@ function mapValidationResultRow(row: Record<string, unknown>): ValidationResultR
   };
 }
 
+function mapProjectGitHubBindingRow(
+  row: Record<string, unknown>,
+): ProjectGitHubBindingRecord {
+  return {
+    projectId: String(row.project_id),
+    owner: String(row.owner),
+    repo: String(row.repo),
+    branch: String(row.branch),
+    defaultBranch: String(row.default_branch),
+    remoteUrl: String(row.remote_url),
+    source: row.source as ProjectGitHubBindingRecord["source"],
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
 function mapConversationTurnRow(row: Record<string, unknown>): ConversationTurnRecord {
   return {
     id: String(row.id),
@@ -303,6 +332,19 @@ function getAttachmentRows(projectId: string): AttachmentRecord[] {
     )
     .all(projectId) as Record<string, unknown>[];
   return rows.map(mapAttachmentRow);
+}
+
+function getProjectGitHubBinding(projectId: string): ProjectGitHubBindingRecord | null {
+  const row = getDb()
+    .prepare(
+      `SELECT *
+         FROM project_github_bindings
+        WHERE project_id = ?
+        LIMIT 1`,
+    )
+    .get(projectId) as Record<string, unknown> | undefined;
+
+  return row ? mapProjectGitHubBindingRow(row) : null;
 }
 
 function getConversationTurns(projectId: string): ConversationTurnRecord[] {
@@ -425,6 +467,31 @@ async function runCommand(
   });
 }
 
+function getRepoSyncPath(projectId: string): string {
+  return path.join(getProjectPaths(projectId).root, "repo-sync");
+}
+
+function githubAuthHeaderValue(token: string): string {
+  return `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+}
+
+function gitAuthArgs(token: string): string[] {
+  return ["-c", `http.extraHeader=${githubAuthHeaderValue(token)}`];
+}
+
+async function removeDirectoryContents(directoryPath: string): Promise<void> {
+  await fs.mkdir(directoryPath, { recursive: true });
+  const entries = await fs.readdir(directoryPath);
+  await Promise.all(
+    entries.map((entry) =>
+      fs.rm(path.join(directoryPath, entry), {
+        recursive: true,
+        force: true,
+      }),
+    ),
+  );
+}
+
 function installEnvironment(): NodeJS.ProcessEnv {
   return {
     ...process.env,
@@ -433,6 +500,142 @@ function installEnvironment(): NodeJS.ProcessEnv {
     NPM_CONFIG_PRODUCTION: "false",
     YARN_PRODUCTION: "false",
   };
+}
+
+async function cloneRepoToPath(params: {
+  owner: string;
+  repo: string;
+  branch: string;
+  token: string;
+  destination: string;
+}): Promise<void> {
+  await fs.rm(params.destination, { recursive: true, force: true });
+  await fs.mkdir(path.dirname(params.destination), { recursive: true });
+  await runCommand(
+    "git",
+    [
+      ...gitAuthArgs(params.token),
+      "clone",
+      "--depth",
+      "1",
+      "--branch",
+      params.branch,
+      `https://github.com/${params.owner}/${params.repo}.git`,
+      params.destination,
+    ],
+    process.cwd(),
+    "git clone",
+  );
+}
+
+async function bootstrapRepoSyncClone(params: {
+  projectId: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  token: string;
+}): Promise<string> {
+  const repoSyncPath = getRepoSyncPath(params.projectId);
+  await cloneRepoToPath({
+    owner: params.owner,
+    repo: params.repo,
+    branch: params.branch,
+    token: params.token,
+    destination: repoSyncPath,
+  });
+  return repoSyncPath;
+}
+
+async function bootstrapRepoSyncForNewRepo(params: {
+  projectId: string;
+  owner: string;
+  repo: string;
+  branch: string;
+}): Promise<string> {
+  const repoSyncPath = getRepoSyncPath(params.projectId);
+  await fs.rm(repoSyncPath, { recursive: true, force: true });
+  await fs.mkdir(repoSyncPath, { recursive: true });
+  await runCommand("git", ["init", "-b", params.branch], repoSyncPath, "git init");
+  await runCommand(
+    "git",
+    ["remote", "add", "origin", `https://github.com/${params.owner}/${params.repo}.git`],
+    repoSyncPath,
+    "git remote add",
+  );
+  return repoSyncPath;
+}
+
+async function syncRepoSyncToCurrent(projectId: string): Promise<void> {
+  const repoSyncPath = getRepoSyncPath(projectId);
+  const currentPath = getProjectPaths(projectId).current;
+  await removeDirectoryContents(currentPath);
+  await fs.cp(repoSyncPath, currentPath, {
+    recursive: true,
+    force: true,
+    filter: (originPath) => shouldIgnoreEntry(path.basename(originPath)) === false,
+  });
+}
+
+async function copyCurrentToTempClone(params: {
+  projectId: string;
+  destination: string;
+}): Promise<void> {
+  await clearDirectoryExcept(params.destination, new Set([".git"]));
+  await fs.cp(getProjectPaths(params.projectId).current, params.destination, {
+    recursive: true,
+    force: true,
+    filter: (originPath) => shouldIgnoreEntry(path.basename(originPath)) === false,
+  });
+}
+
+async function upsertProjectGitHubBinding(params: {
+  projectId: string;
+  githubConnectionId: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  defaultBranch: string;
+  remoteUrl: string;
+  source: ProjectGitHubBindingRecord["source"];
+}): Promise<ProjectGitHubBindingRecord> {
+  const existing = getProjectGitHubBinding(params.projectId);
+  const createdAt = existing?.createdAt || nowIso();
+  const updatedAt = nowIso();
+
+  getDb()
+    .prepare(
+      `INSERT INTO project_github_bindings (
+        project_id, github_connection_id, owner, repo, branch, default_branch, remote_url, source, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id) DO UPDATE SET
+        github_connection_id = excluded.github_connection_id,
+        owner = excluded.owner,
+        repo = excluded.repo,
+        branch = excluded.branch,
+        default_branch = excluded.default_branch,
+        remote_url = excluded.remote_url,
+        source = excluded.source,
+        updated_at = excluded.updated_at`,
+    )
+    .run(
+      params.projectId,
+      params.githubConnectionId,
+      params.owner,
+      params.repo,
+      params.branch,
+      params.defaultBranch,
+      params.remoteUrl,
+      params.source,
+      createdAt,
+      updatedAt,
+    );
+
+  return getProjectGitHubBinding(params.projectId)!;
+}
+
+async function createSourceArchiveFromCurrent(projectId: string): Promise<void> {
+  const projectPaths = getProjectPaths(projectId);
+  await archiveDirectoryToFile(projectPaths.current, projectPaths.sourceZip);
 }
 
 async function installDependencies(projectDir: string, packageManager: PackageManager): Promise<void> {
@@ -1515,6 +1718,7 @@ export async function getWorkspaceSnapshot(
     conversationTurns: getConversationTurns(projectId),
     attachments: getAttachmentRows(projectId),
     kits: getMakeKits(projectId),
+    githubBinding: getProjectGitHubBinding(projectId),
     fileTree: await buildFileTree(project.extractedPath),
     currentFilePath,
     currentFileContent,
@@ -1544,6 +1748,7 @@ export async function getDashboardSnapshot(
     currentProject: currentProjectId
       ? await getWorkspaceSnapshot(currentProjectId, { ensurePreview: false })
       : null,
+    githubConnection: getGitHubConnectionStatus(),
     aiModels: listAiModels(),
     defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
   };
@@ -1560,6 +1765,323 @@ export async function deleteProject(projectId: string): Promise<void> {
 
   getDb().prepare("DELETE FROM projects WHERE id = ?").run(projectId);
   await fs.rm(getProjectPaths(projectId).root, { recursive: true, force: true });
+}
+
+export async function listAvailableGitHubRepos(): Promise<GitHubRepoSummary[]> {
+  return listGitHubRepos();
+}
+
+export async function createProjectFromGitHubRepo(params: {
+  owner: string;
+  repo: string;
+}): Promise<ProjectWorkspace> {
+  await ensureStorageReady();
+  const connection = getStoredGitHubConnection();
+  if (!connection) {
+    throw new Error("Connect GitHub first to import a repo.");
+  }
+
+  const repository = await getGitHubRepo(params.owner, params.repo);
+  const projectId = nanoid(10);
+  const timestamp = nowIso();
+  const projectPaths = await ensureProjectDirectories(projectId);
+
+  try {
+    await bootstrapRepoSyncClone({
+      projectId,
+      owner: repository.owner,
+      repo: repository.name,
+      branch: repository.defaultBranch,
+      token: connection.accessToken,
+    });
+    await syncRepoSyncToCurrent(projectId);
+
+    const validation = await validateProjectDirectory(projectPaths.current);
+    if (!validation.ok) {
+      throw new Error(validation.reason);
+    }
+
+    await normalizeImportedProject(projectPaths.current);
+    const runtime = requireRuntime(await detectProjectRuntime(projectPaths.current));
+    const packageManager = await detectPackageManager(projectPaths.current);
+
+    const insertedProject: ProjectRecord = {
+      id: projectId,
+      name: repository.name,
+      sourceZipPath: projectPaths.sourceZip,
+      extractedPath: projectPaths.current,
+      packageManager,
+      status: "installing",
+      currentRevisionId: null,
+      manifestHash: null,
+      previewPort: null,
+      lastOpenedAt: timestamp,
+      createdAt: timestamp,
+    };
+
+    getDb()
+      .prepare(
+        `INSERT INTO projects (
+          id, name, source_zip_path, extracted_path, package_manager, status,
+          current_revision_id, manifest_hash, preview_port, last_opened_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        insertedProject.id,
+        insertedProject.name,
+        insertedProject.sourceZipPath,
+        insertedProject.extractedPath,
+        insertedProject.packageManager,
+        insertedProject.status,
+        insertedProject.currentRevisionId,
+        insertedProject.manifestHash,
+        insertedProject.previewPort,
+        insertedProject.lastOpenedAt,
+        insertedProject.createdAt,
+      );
+
+    await upsertProjectGitHubBinding({
+      projectId,
+      githubConnectionId: connection.id,
+      owner: repository.owner,
+      repo: repository.name,
+      branch: repository.defaultBranch,
+      defaultBranch: repository.defaultBranch,
+      remoteUrl: repository.cloneUrl,
+      source: "imported",
+    });
+
+    await createSourceArchiveFromCurrent(projectId);
+    await installDependenciesWithRecovery(projectId, projectPaths.current, packageManager);
+    await syncProjectKnowledgeAndKits(
+      {
+        id: projectId,
+        name: insertedProject.name,
+        extractedPath: projectPaths.current,
+        packageManager,
+      },
+      runtime,
+    );
+    const manifestHash = await readManifestHash(projectPaths.current);
+    getDb()
+      .prepare("UPDATE projects SET status = ?, manifest_hash = ? WHERE id = ?")
+      .run("ready", manifestHash, projectId);
+
+    const revision = await createRevision({
+      projectId,
+      label: "Initial import",
+      source: "upload",
+      summary: `Imported from ${repository.fullName}.`,
+    });
+    const validationResult = await createValidationResultRecord({
+      projectId,
+      revisionId: revision.id,
+      status: "passed",
+      buildStatus: "passed",
+      previewStatus: "passed",
+      selectorStatus: "skipped",
+      importsStatus: "passed",
+      designStatus: "passed",
+      details: [`Imported ${repository.fullName} and prepared the preview workspace.`],
+    });
+    await createConversationTurn({
+      projectId,
+      revisionId: revision.id,
+      kind: "system",
+      status: "info",
+      summary: `Imported ${repository.fullName} and linked it to GitHub.`,
+      validationResultId: validationResult.id,
+    });
+
+    await ensurePreviewRunner(projectId);
+    return getWorkspaceSnapshot(projectId, { ensurePreview: false });
+  } catch (error) {
+    await stopPreviewRunner(projectId).catch(() => undefined);
+    getDb().prepare("DELETE FROM projects WHERE id = ?").run(projectId);
+    await fs.rm(projectPaths.root, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function connectProjectToGitHubRepo(params: {
+  projectId: string;
+  owner: string;
+  repo: string;
+  branch?: string | null;
+}): Promise<ProjectWorkspace> {
+  const project = getProjectRow(params.projectId);
+  const connection = getStoredGitHubConnection();
+  if (!connection) {
+    throw new Error("Connect GitHub first to link this project.");
+  }
+
+  const repository = await getGitHubRepo(params.owner, params.repo);
+  const branch =
+    params.branch ||
+    (getProjectGitHubBinding(params.projectId)?.source === "imported"
+      ? repository.defaultBranch
+      : `mymake-${project.id.toLowerCase()}`);
+
+  try {
+    await bootstrapRepoSyncClone({
+      projectId: params.projectId,
+      owner: repository.owner,
+      repo: repository.name,
+      branch: repository.defaultBranch,
+      token: connection.accessToken,
+    });
+  } catch {
+    await bootstrapRepoSyncForNewRepo({
+      projectId: params.projectId,
+      owner: repository.owner,
+      repo: repository.name,
+      branch,
+    });
+  }
+
+  await upsertProjectGitHubBinding({
+    projectId: params.projectId,
+    githubConnectionId: connection.id,
+    owner: repository.owner,
+    repo: repository.name,
+    branch,
+    defaultBranch: repository.defaultBranch,
+    remoteUrl: repository.cloneUrl,
+    source: "linked",
+  });
+
+  return getWorkspaceSnapshot(project.id, { ensurePreview: false });
+}
+
+export async function createRepoForProject(params: {
+  projectId: string;
+  name: string;
+  isPrivate: boolean;
+}): Promise<ProjectWorkspace> {
+  const project = getProjectRow(params.projectId);
+  const connection = getStoredGitHubConnection();
+  if (!connection) {
+    throw new Error("Connect GitHub first to create a repo from this project.");
+  }
+
+  const repository = await createGitHubRepo({
+    name: params.name,
+    isPrivate: params.isPrivate,
+    description: `Created from ${project.name} in MyMake.`,
+  });
+
+  await bootstrapRepoSyncForNewRepo({
+    projectId: params.projectId,
+    owner: repository.owner,
+    repo: repository.name,
+    branch: repository.defaultBranch || "main",
+  });
+
+  await upsertProjectGitHubBinding({
+    projectId: params.projectId,
+    githubConnectionId: connection.id,
+    owner: repository.owner,
+    repo: repository.name,
+    branch: repository.defaultBranch || "main",
+    defaultBranch: repository.defaultBranch || "main",
+    remoteUrl: repository.cloneUrl,
+    source: "created",
+  });
+
+  return getWorkspaceSnapshot(project.id, { ensurePreview: false });
+}
+
+export async function pushProjectToGitHub(projectId: string): Promise<{
+  workspace: ProjectWorkspace;
+  summary: string;
+}> {
+  const project = getProjectRow(projectId);
+  const binding = getProjectGitHubBinding(projectId);
+  const connection = getStoredGitHubConnection();
+  if (!binding || !connection) {
+    throw new Error("Link this project to GitHub first.");
+  }
+
+  const tempWorkTree = await fs.mkdtemp(path.join(os.tmpdir(), `mymake-git-${projectId}-`));
+
+  try {
+    if (binding.source === "created") {
+      await runCommand("git", ["init", "-b", binding.branch], tempWorkTree, "git init");
+      await runCommand(
+        "git",
+        ["remote", "add", "origin", `https://github.com/${binding.owner}/${binding.repo}.git`],
+        tempWorkTree,
+        "git remote add",
+      );
+    } else {
+      await cloneRepoToPath({
+        owner: binding.owner,
+        repo: binding.repo,
+        branch: binding.defaultBranch,
+        token: connection.accessToken,
+        destination: tempWorkTree,
+      });
+    }
+
+    await copyCurrentToTempClone({
+      projectId,
+      destination: tempWorkTree,
+    });
+
+    await runCommand("git", ["checkout", "-B", binding.branch], tempWorkTree, "git checkout");
+    await runCommand(
+      "git",
+      ["config", "user.name", connection.name || connection.login],
+      tempWorkTree,
+      "git config",
+    );
+    await runCommand(
+      "git",
+      ["config", "user.email", `${connection.login}@users.noreply.github.com`],
+      tempWorkTree,
+      "git config",
+    );
+    await runCommand("git", ["add", "-A"], tempWorkTree, "git add");
+
+    try {
+      await runCommand(
+        "git",
+        ["commit", "-m", `MyMake sync ${project.name} ${nowIso()}`],
+        tempWorkTree,
+        "git commit",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/nothing to commit|no changes added/i.test(message)) {
+        throw error;
+      }
+
+      return {
+        workspace: await getWorkspaceSnapshot(projectId, { ensurePreview: false }),
+        summary: `No new file changes to push for ${binding.owner}/${binding.repo}.`,
+      };
+    }
+
+    await runCommand(
+      "git",
+      [
+        ...gitAuthArgs(connection.accessToken),
+        "push",
+        "-u",
+        "origin",
+        `HEAD:${binding.branch}`,
+      ],
+      tempWorkTree,
+      "git push",
+    );
+
+    return {
+      workspace: await getWorkspaceSnapshot(projectId, { ensurePreview: false }),
+      summary: `Pushed ${project.name} to ${binding.owner}/${binding.repo} on ${binding.branch}.`,
+    };
+  } finally {
+    await fs.rm(tempWorkTree, { recursive: true, force: true });
+  }
 }
 
 export async function createProjectFromUpload(
@@ -2080,7 +2602,7 @@ export async function applyAiEdit(
     )
     .run(contextSnapshot.id, userTurn.id);
 
-  let aiResult:
+  type GeneratedAiResult =
     | {
         summary: string;
         warnings: string[];
@@ -2094,74 +2616,120 @@ export async function applyAiEdit(
         rawResponse: string | null;
       };
 
-  let changedFiles: Array<{ path: string; content: string; reason?: string }>;
+  let aiResult: GeneratedAiResult | null = null;
+  let changedFiles: Array<{ path: string; content: string; reason?: string }> = [];
   const canUseStaticSelectionFallback =
     runtime === "static" && hasStaticEditableOverrides(projectFiles);
+  const isCodex = isCodexModel(payload.aiModelKey || DEFAULT_AI_MODEL_KEY);
+  const maxExecutionAttempts = isCodex ? 3 : 1;
   const requiresDeterministicStaticAttachmentSwap =
     canUseStaticSelectionFallback &&
     promptRequestsAttachmentReplacement(payload.prompt) &&
     attachments.some((attachment) => attachment.mimeType.startsWith("image/"));
-  const strategyQueue = uniqueStrings(
+  const baseStrategyQueue = uniqueStrings(
     [
       requiresDeterministicStaticAttachmentSwap ? "static-override" : "",
       editPlan.strategy,
+      "direct-property",
       editPlan.strategy !== "patch" && effectiveCurrentFilePath ? "patch" : "",
       canUseStaticSelectionFallback && !requiresDeterministicStaticAttachmentSwap
         ? "static-override"
         : "",
+      isCodex ? "rewrite" : "",
     ].filter(Boolean),
   ) as EditPlan["strategy"][];
 
   let lastAttemptError: unknown = null;
-  aiResult = {
-    summary: "",
-    warnings: [],
-    changedFiles: [],
-    rawResponse: null,
-  };
-  changedFiles = [];
+  let lastRawResponse: string | null = null;
+  let changedPaths: string[] = [];
+  let validationResultData: Omit<ValidationResultRecord, "id" | "createdAt"> | null = null;
+  const attemptFailures: string[] = [];
+  let successfulAttemptCount = 0;
 
-  for (const strategy of strategyQueue) {
-    try {
-      if (strategy === "direct-property") {
-        const directResult = await tryApplyDirectTextReplacement({
-          projectDir: project.extractedPath,
-          prompt: payload.prompt,
-          selection: payload.selection,
-          selectionTarget,
-          candidateFiles: editPlan.candidateFiles,
-        });
-        if (!directResult) {
-          throw new Error("Direct property mode could not safely resolve this change.");
+  for (let attemptIndex = 0; attemptIndex < maxExecutionAttempts; attemptIndex += 1) {
+    const attemptPrompt =
+      isCodex && attemptFailures.length
+        ? `${payload.prompt.trim()}
+
+Previous attempts failed for these reasons:
+${attemptFailures.map((failure, index) => `${index + 1}. ${failure}`).join("\n")}
+
+Fix the root cause before applying the edit. You may update related files, styles, imports, data, or overrides as needed, but the requested change must render visibly and the preview must remain bootable.`
+        : payload.prompt;
+    const attemptStrategyQueue = uniqueStrings(
+      [
+        ...baseStrategyQueue,
+        isCodex && attemptIndex > 0 && effectiveCurrentFilePath ? "patch" : "",
+        isCodex && attemptIndex > 0 ? "rewrite" : "",
+      ].filter(Boolean),
+    ) as EditPlan["strategy"][];
+
+    let attemptResult: GeneratedAiResult | null = null;
+    let attemptChangedFiles: Array<{ path: string; content: string; reason?: string }> = [];
+    let attemptError: unknown = null;
+
+    for (const strategy of attemptStrategyQueue) {
+      try {
+        if (strategy === "direct-property") {
+          const directResult = await tryApplyDirectTextReplacement({
+            projectDir: project.extractedPath,
+            prompt: payload.prompt,
+            selection: payload.selection,
+            selectionTarget,
+            candidateFiles: editPlan.candidateFiles,
+          });
+          if (!directResult) {
+            throw new Error("Direct property mode could not safely resolve this change.");
+          }
+          attemptResult = directResult;
+          attemptChangedFiles = directResult.changedFiles;
+          break;
         }
-        aiResult = directResult;
-        changedFiles = directResult.changedFiles;
-        break;
-      }
 
-      if (strategy === "static-override") {
-        const staticResult = await tryApplyStaticSelectionFallback({
-          projectDir: project.extractedPath,
-          prompt: payload.prompt,
-          selection: payload.selection,
-          selectionTarget,
-          attachments,
-        });
-        if (!staticResult) {
-          throw new Error("Static override mode could not resolve this change.");
+        if (strategy === "static-override") {
+          const staticResult = await tryApplyStaticSelectionFallback({
+            projectDir: project.extractedPath,
+            prompt: payload.prompt,
+            selection: payload.selection,
+            selectionTarget,
+            attachments,
+          });
+          if (!staticResult) {
+            throw new Error("Static override mode could not resolve this change.");
+          }
+          attemptResult = {
+            ...staticResult,
+            rawResponse: null,
+          };
+          attemptChangedFiles = staticResult.changedFiles;
+          break;
         }
-        aiResult = {
-          ...staticResult,
-          rawResponse: null,
-        };
-        changedFiles = staticResult.changedFiles;
-        break;
-      }
 
-      if (strategy === "patch" && effectiveCurrentFilePath) {
-        aiResult = await requestAiPatchEdit({
+        if (strategy === "patch" && effectiveCurrentFilePath) {
+          const patchResult = await requestAiPatchEdit({
+            aiModelKey: payload.aiModelKey,
+            prompt: attemptPrompt,
+            editMode,
+            selection: payload.selection,
+            selectionTarget,
+            editPlan: {
+              ...editPlan,
+              strategy,
+            },
+            currentFilePath: effectiveCurrentFilePath,
+            contextFiles: contextGraph.contextFiles,
+            contextSummary: contextGraph.compressedMemory,
+            activeKitSummaries,
+            attachments,
+          });
+          attemptResult = patchResult;
+          attemptChangedFiles = await applyPatchOperations(project.extractedPath, patchResult.operations);
+          break;
+        }
+
+        const rewriteResult = await requestAiEdit({
           aiModelKey: payload.aiModelKey,
-          prompt: payload.prompt,
+          prompt: attemptPrompt,
           editMode,
           selection: payload.selection,
           selectionTarget,
@@ -2175,34 +2743,97 @@ export async function applyAiEdit(
           activeKitSummaries,
           attachments,
         });
-        changedFiles = await applyPatchOperations(project.extractedPath, aiResult.operations);
+        attemptResult = rewriteResult;
+        attemptChangedFiles = rewriteResult.changedFiles;
         break;
+      } catch (error) {
+        attemptError = error;
       }
+    }
 
-      aiResult = await requestAiEdit({
-        aiModelKey: payload.aiModelKey,
+    if (!attemptChangedFiles.length || !attemptResult) {
+      lastAttemptError = attemptError;
+      lastRawResponse = attemptResult?.rawResponse || null;
+      attemptFailures.push(
+        attemptError instanceof Error
+          ? attemptError.message
+          : "The edit planner could not produce a safe change set.",
+      );
+      continue;
+    }
+
+    attemptChangedFiles = attemptChangedFiles.map((file) =>
+      file.path === OVERRIDES_CONFIG_PATH
+        ? {
+            ...file,
+            content: normalizeOverrideConfigContent(file.content),
+          }
+        : file,
+    );
+
+    const attemptChangedPaths: string[] = [];
+    for (const change of attemptChangedFiles) {
+      const absolutePath = resolveInsideRoot(project.extractedPath, change.path);
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+      await fs.writeFile(absolutePath, change.content, "utf8");
+      attemptChangedPaths.push(toPosixPath(change.path));
+    }
+
+    const nextManifestHash = await readManifestHash(project.extractedPath);
+    if (nextManifestHash !== project.manifestHash) {
+      await installDependenciesWithRecovery(
+        payload.projectId,
+        project.extractedPath,
+        project.packageManager,
+      );
+    }
+
+    try {
+      validationResultData = await runEditValidation({
+        projectId: payload.projectId,
+        projectDir: project.extractedPath,
+        changedFiles: attemptChangedFiles,
         prompt: payload.prompt,
         editMode,
         selection: payload.selection,
         selectionTarget,
-        editPlan: {
-          ...editPlan,
-          strategy,
-        },
-        currentFilePath: effectiveCurrentFilePath,
-        contextFiles: contextGraph.contextFiles,
-        contextSummary: contextGraph.compressedMemory,
-        activeKitSummaries,
-        attachments,
+        rawProviderOutput: attemptResult.rawResponse,
       });
-      changedFiles = aiResult.changedFiles;
+      aiResult = attemptResult;
+      changedFiles = attemptChangedFiles;
+      changedPaths = attemptChangedPaths;
+      lastRawResponse = attemptResult.rawResponse;
+      successfulAttemptCount = attemptIndex + 1;
       break;
     } catch (error) {
-      lastAttemptError = error;
+      await syncSnapshotToCurrent(currentRevision.snapshotPath, project.extractedPath);
+      if (runtime === "static") {
+        await ensureStaticEditableOverridesSupport(project.extractedPath);
+      }
+      const rollbackManifestHash = await readManifestHash(project.extractedPath);
+      if (rollbackManifestHash !== project.manifestHash) {
+        await installDependenciesWithRecovery(
+          payload.projectId,
+          project.extractedPath,
+          project.packageManager,
+        );
+      }
+      await restartPreviewRunner(payload.projectId).catch(() => undefined);
+
+      lastAttemptError =
+        error instanceof Error
+          ? new Error(`${error.message} MyMake rolled back to the last working checkpoint.`)
+          : new Error("The edit failed validation and was rolled back.");
+      lastRawResponse = attemptResult.rawResponse;
+      attemptFailures.push(
+        error instanceof Error
+          ? error.message
+          : "Validation failed after applying the edit.",
+      );
     }
   }
 
-  if (!changedFiles.length) {
+  if (!changedFiles.length || !aiResult || !validationResultData) {
     const validationResult = await createValidationResultRecord({
       projectId: payload.projectId,
       revisionId: currentRevision.id,
@@ -2213,12 +2844,14 @@ export async function applyAiEdit(
       importsStatus: "failed",
       designStatus: "skipped",
       warnings: [],
-      details: [
-        lastAttemptError instanceof Error
-          ? lastAttemptError.message
-          : "The edit planner could not produce a safe change set.",
-      ],
-      rawProviderOutput: aiResult.rawResponse,
+      details: attemptFailures.length
+        ? attemptFailures
+        : [
+            lastAttemptError instanceof Error
+              ? lastAttemptError.message
+              : "The edit planner could not produce a safe change set.",
+          ],
+      rawProviderOutput: lastRawResponse,
       retryable: true,
     });
     await createConversationTurn({
@@ -2246,98 +2879,6 @@ export async function applyAiEdit(
       : new Error("The AI edit request failed.");
   }
 
-  changedFiles = changedFiles.map((file) =>
-    file.path === OVERRIDES_CONFIG_PATH
-      ? {
-          ...file,
-          content: normalizeOverrideConfigContent(file.content),
-        }
-      : file,
-  );
-
-  const changedPaths: string[] = [];
-  for (const change of changedFiles) {
-    const absolutePath = resolveInsideRoot(project.extractedPath, change.path);
-    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, change.content, "utf8");
-    changedPaths.push(toPosixPath(change.path));
-  }
-
-  const nextManifestHash = await readManifestHash(project.extractedPath);
-  if (nextManifestHash !== project.manifestHash) {
-    await installDependenciesWithRecovery(
-      payload.projectId,
-      project.extractedPath,
-      project.packageManager,
-    );
-  }
-  let validationResultData: Omit<ValidationResultRecord, "id" | "createdAt">;
-  try {
-    validationResultData = await runEditValidation({
-      projectId: payload.projectId,
-      projectDir: project.extractedPath,
-      changedFiles,
-      prompt: payload.prompt,
-      editMode,
-      selection: payload.selection,
-      selectionTarget,
-      rawProviderOutput: aiResult.rawResponse,
-    });
-  } catch (error) {
-    await syncSnapshotToCurrent(currentRevision.snapshotPath, project.extractedPath);
-    if (runtime === "static") {
-      await ensureStaticEditableOverridesSupport(project.extractedPath);
-    }
-    const rollbackManifestHash = await readManifestHash(project.extractedPath);
-    if (rollbackManifestHash !== project.manifestHash) {
-      await installDependenciesWithRecovery(
-        payload.projectId,
-        project.extractedPath,
-        project.packageManager,
-      );
-    }
-    await restartPreviewRunner(payload.projectId).catch(() => undefined);
-    const failedValidation = await createValidationResultRecord({
-      projectId: payload.projectId,
-      revisionId: currentRevision.id,
-      status: "failed",
-      buildStatus: "failed",
-      previewStatus: "failed",
-      selectorStatus: selectionTarget ? "warning" : "skipped",
-      importsStatus: "failed",
-      designStatus: "skipped",
-      details: [
-        error instanceof Error ? error.message : "Validation failed after applying the edit.",
-      ],
-      rawProviderOutput: aiResult.rawResponse,
-      retryable: true,
-    });
-    await createConversationTurn({
-      projectId: payload.projectId,
-      revisionId: currentRevision.id,
-      kind: "assistant",
-      status: "failed",
-      summary:
-        error instanceof Error
-          ? error.message
-          : "The edit failed validation and was rolled back.",
-      aiModelKey: payload.aiModelKey || DEFAULT_AI_MODEL_KEY,
-      provider,
-      editMode,
-      selectionTarget,
-      changedFiles: changedFiles.map((item) => ({ path: item.path, reason: item.reason })),
-      warnings: failedValidation.warnings,
-      contextSnapshotId: contextSnapshot.id,
-      validationResultId: failedValidation.id,
-    });
-    getDb()
-      .prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`)
-      .run("failed", userTurn.id);
-    throw error instanceof Error
-      ? new Error(`${error.message} MyMake rolled back to the last working checkpoint.`)
-      : new Error("The edit failed validation and was rolled back.");
-  }
-
   const revision = await createRevision({
     projectId: payload.projectId,
     label: payload.prompt.trim(),
@@ -2349,6 +2890,10 @@ export async function applyAiEdit(
     ...validationResultData,
     revisionId: revision.id,
   });
+  const allWarnings = [...aiResult.warnings, ...validationResult.warnings];
+  if (successfulAttemptCount > 1) {
+    allWarnings.push(`Codex recovered after ${successfulAttemptCount} attempts.`);
+  }
   const assistantTurn = await createConversationTurn({
     projectId: payload.projectId,
     revisionId: revision.id,
@@ -2360,7 +2905,7 @@ export async function applyAiEdit(
     editMode,
     selectionTarget,
     changedFiles: changedFiles.map((item) => ({ path: item.path, reason: item.reason })),
-    warnings: [...aiResult.warnings, ...validationResult.warnings],
+    warnings: allWarnings,
     contextSnapshotId: contextSnapshot.id,
     validationResultId: validationResult.id,
   });
@@ -2386,7 +2931,7 @@ export async function applyAiEdit(
     await syncProjectKnowledgeAndKits(getProjectRow(payload.projectId), runtime);
   return {
     summary: aiResult.summary,
-    warnings: [...aiResult.warnings, ...validationResult.warnings],
+    warnings: allWarnings,
     changedFiles: changedFiles.map((item) => ({
       path: item.path,
       reason: item.reason,

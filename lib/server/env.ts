@@ -2,8 +2,11 @@ import path from "node:path";
 
 interface EnvConfig {
   anthropicApiKey?: string;
+  githubClientId?: string;
+  githubClientSecret?: string;
   openaiApiKey?: string;
   appPasscode: string;
+  appBaseUrl?: string;
   databasePath: string;
   port: number;
   storageRoot: string;
@@ -24,12 +27,15 @@ export function getEnv(): EnvConfig {
 
   cachedEnv = {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    githubClientId: process.env.GITHUB_CLIENT_ID,
+    githubClientSecret: process.env.GITHUB_CLIENT_SECRET,
     openaiApiKey: process.env.OPENAI_API_KEY,
     appPasscode:
       process.env.APP_PASSCODE ||
       (process.env.NODE_ENV === "production"
         ? "set-a-real-passcode"
         : "mymake-local-passcode"),
+    appBaseUrl: process.env.APP_BASE_URL,
     databasePath,
     port: Number(process.env.PORT || 3000),
     storageRoot,

@@ -40,6 +40,8 @@ import type {
   DashboardSnapshot,
   DevicePreset,
   FileNode,
+  GitHubConnectionRecord,
+  GitHubRepoSummary,
   MakeKitRecord,
   ProjectRecord,
   ProjectWorkspace,
@@ -95,6 +97,7 @@ type SnapshotResponse = DashboardSnapshot & {
     warnings: string[];
     changedFiles: Array<{ path: string; reason?: string }>;
   };
+  feedback?: string | null;
 };
 
 class RequestError extends Error {
@@ -174,6 +177,10 @@ function routeLabel(route: string) {
 function shortAiModelLabel(model: AiModelOption): string {
   if (model.key === "openai-chatgpt-5-2") {
     return "GPT 5.2";
+  }
+
+  if (model.key === "openai-codex") {
+    return "Codex";
   }
 
   if (model.key === "anthropic-sonnet-4-6") {
@@ -371,6 +378,19 @@ function ToolbarIconButton({
     >
       {children}
     </button>
+  );
+}
+
+function GitHubMark({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="M12 2C6.477 2 2 6.596 2 12.266c0 4.535 2.865 8.382 6.839 9.74.5.095.683-.222.683-.493 0-.243-.009-.887-.014-1.741-2.782.62-3.369-1.382-3.369-1.382-.455-1.185-1.11-1.501-1.11-1.501-.908-.64.069-.627.069-.627 1.004.072 1.531 1.058 1.531 1.058.892 1.569 2.341 1.116 2.91.853.091-.664.349-1.116.635-1.373-2.221-.26-4.555-1.138-4.555-5.066 0-1.119.389-2.034 1.026-2.751-.103-.261-.445-1.311.098-2.733 0 0 .837-.275 2.744 1.051A9.354 9.354 0 0 1 12 7.84c.851.004 1.708.117 2.507.344 1.905-1.326 2.74-1.051 2.74-1.051.546 1.422.204 2.472.101 2.733.639.717 1.025 1.632 1.025 2.751 0 3.938-2.338 4.803-4.566 5.058.359.319.679.949.679 1.913 0 1.381-.012 2.494-.012 2.833 0 .274.18.593.688.492C19.138 20.644 22 16.799 22 12.266 22 6.596 17.523 2 12 2Z" />
+    </svg>
   );
 }
 
@@ -584,7 +604,9 @@ function HomeDashboard({
   feedback,
   error,
   filteredProjects,
+  githubConnection,
   homeQuery,
+  onImportRepo,
   onDeleteProject,
   onLogout,
   onOpenProject,
@@ -597,7 +619,9 @@ function HomeDashboard({
   feedback: string | null;
   error: string | null;
   filteredProjects: ProjectRecord[];
+  githubConnection: GitHubConnectionRecord;
   homeQuery: string;
+  onImportRepo: () => void;
   onDeleteProject: (project: ProjectRecord) => void;
   onLogout: () => void;
   onOpenProject: (projectId: string) => void;
@@ -681,6 +705,14 @@ function HomeDashboard({
             <button
               className="inline-flex h-10 items-center justify-center gap-2 rounded-[12px] border border-white/[0.08] bg-[#2f3034] px-4 text-sm font-medium text-white transition hover:bg-[#34363b]"
               type="button"
+              onClick={onImportRepo}
+            >
+              <GitHubMark className="h-4 w-4" />
+              {githubConnection.connected ? "Import GitHub repo" : "Connect GitHub"}
+            </button>
+            <button
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-[12px] border border-white/[0.08] bg-[#2f3034] px-4 text-sm font-medium text-white transition hover:bg-[#34363b]"
+              type="button"
               onClick={onUploadClick}
             >
               <Plus className="h-4 w-4" />
@@ -757,6 +789,198 @@ function HomeDashboard({
   );
 }
 
+function GitHubModal({
+  connection,
+  currentProject,
+  isLoading,
+  isSubmitting,
+  mode,
+  newRepoName,
+  newRepoPrivate,
+  onClose,
+  onConnectGitHub,
+  onCreateRepo,
+  onImportRepo,
+  onNewRepoNameChange,
+  onNewRepoPrivateChange,
+  onRepoConnect,
+  onSetMode,
+  repos,
+}: {
+  connection: GitHubConnectionRecord;
+  currentProject: ProjectWorkspace | null;
+  isLoading: boolean;
+  isSubmitting: boolean;
+  mode: "import" | "connect";
+  newRepoName: string;
+  newRepoPrivate: boolean;
+  onClose: () => void;
+  onConnectGitHub: () => void;
+  onCreateRepo: () => void;
+  onImportRepo: (repo: GitHubRepoSummary) => void;
+  onNewRepoNameChange: (value: string) => void;
+  onNewRepoPrivateChange: (value: boolean) => void;
+  onRepoConnect: (repo: GitHubRepoSummary) => void;
+  onSetMode: (mode: "import" | "connect") => void;
+  repos: GitHubRepoSummary[];
+}) {
+  const isProjectMode = mode === "connect";
+
+  return (
+    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/55 px-4 py-8 backdrop-blur-sm">
+      <div className="w-full max-w-[760px] rounded-[28px] border border-white/[0.08] bg-[#242528] p-5 shadow-[0_30px_90px_rgba(0,0,0,0.42)]">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-lg font-medium text-white">
+              {isProjectMode ? "Connect this project to GitHub" : "Import a GitHub repo"}
+            </p>
+            <p className="mt-1 text-sm leading-6 text-slate-400">
+              {isProjectMode
+                ? "Link this project to an existing repo, or create a brand new repo and push from MyMake."
+                : "Choose a repo to clone into MyMake as a new live-edit project."}
+            </p>
+          </div>
+          <button
+            className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-white/[0.04] hover:text-white"
+            type="button"
+            onClick={onClose}
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            className={clsx(
+              "rounded-full px-3 py-1.5 text-sm transition",
+              mode === "import"
+                ? "bg-[#5f62ff] text-white"
+                : "bg-[#2f3034] text-slate-300 hover:text-white",
+            )}
+            type="button"
+            onClick={() => onSetMode("import")}
+          >
+            Import repo
+          </button>
+          {currentProject ? (
+            <button
+              className={clsx(
+                "rounded-full px-3 py-1.5 text-sm transition",
+                mode === "connect"
+                  ? "bg-[#5f62ff] text-white"
+                  : "bg-[#2f3034] text-slate-300 hover:text-white",
+              )}
+              type="button"
+              onClick={() => onSetMode("connect")}
+            >
+              Connect current project
+            </button>
+          ) : null}
+        </div>
+
+        {!connection.configured ? (
+          <div className="mt-5 rounded-[18px] border border-amber-300/18 bg-amber-300/10 px-4 py-4 text-sm leading-7 text-amber-100">
+            Add `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` on Railway first, then reconnect here.
+          </div>
+        ) : !connection.connected ? (
+          <div className="mt-5 rounded-[18px] border border-white/[0.08] bg-[#2c2d31] px-4 py-5">
+            <p className="text-sm leading-7 text-slate-300">
+              Connect GitHub once, then MyMake can list your repos, import them as projects, and push back to linked repos.
+            </p>
+            <button
+              className="mt-4 inline-flex h-10 items-center gap-2 rounded-[12px] bg-[#5f62ff] px-4 text-sm font-medium text-white transition hover:bg-[#6b6eff]"
+              type="button"
+              onClick={onConnectGitHub}
+            >
+              <GitHubMark className="h-4 w-4" />
+              Connect GitHub
+            </button>
+          </div>
+        ) : (
+          <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
+            <div className="min-w-0 rounded-[20px] border border-white/[0.08] bg-[#2c2d31] p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-white">Available repos</p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {connection.login ? `Connected as ${connection.login}` : "Connected"}
+                  </p>
+                </div>
+                {isLoading ? <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> : null}
+              </div>
+
+              <div className="mt-3 max-h-[360px] space-y-2 overflow-y-auto pr-1">
+                {repos.map((repo) => (
+                  <button
+                    key={repo.id}
+                    className="flex w-full items-center justify-between gap-4 rounded-[16px] border border-white/[0.08] bg-[#26272b] px-3 py-3 text-left transition hover:border-white/[0.16] hover:bg-[#2c2d31]"
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={() =>
+                      isProjectMode ? onRepoConnect(repo) : onImportRepo(repo)
+                    }
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-white">{repo.fullName}</p>
+                      <p className="mt-1 text-xs text-slate-400">
+                        {repo.private ? "Private" : "Public"} · {repo.defaultBranch}
+                      </p>
+                    </div>
+                    <ExternalLink className="h-4 w-4 shrink-0 text-slate-500" />
+                  </button>
+                ))}
+
+                {!repos.length && !isLoading ? (
+                  <div className="rounded-[16px] border border-dashed border-white/[0.08] bg-[#26272b] px-4 py-6 text-sm leading-7 text-slate-400">
+                    No repos available yet.
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            {isProjectMode ? (
+              <div className="rounded-[20px] border border-white/[0.08] bg-[#2c2d31] p-4">
+                <p className="text-sm font-medium text-white">Create a new repo</p>
+                <p className="mt-1 text-xs leading-5 text-slate-400">
+                  Create a fresh GitHub repo, link this project, then push from the GitHub button in the header.
+                </p>
+                <label className="mt-4 block">
+                  <span className="mb-2 block text-xs uppercase tracking-[0.16em] text-slate-500">
+                    Repo name
+                  </span>
+                  <input
+                    className="h-10 w-full rounded-[12px] border border-white/[0.08] bg-[#26272b] px-3 text-sm text-white outline-none transition focus:border-white/[0.16]"
+                    value={newRepoName}
+                    onChange={(event) => onNewRepoNameChange(event.target.value)}
+                    placeholder="mymake-project"
+                  />
+                </label>
+                <label className="mt-3 flex items-center gap-2 text-sm text-slate-300">
+                  <input
+                    checked={newRepoPrivate}
+                    onChange={(event) => onNewRepoPrivateChange(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Private repo
+                </label>
+                <button
+                  className="mt-4 inline-flex h-10 items-center gap-2 rounded-[12px] bg-[#5f62ff] px-4 text-sm font-medium text-white transition hover:bg-[#6b6eff] disabled:cursor-not-allowed disabled:opacity-50"
+                  type="button"
+                  disabled={isSubmitting || !newRepoName.trim()}
+                  onClick={onCreateRepo}
+                >
+                  {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitHubMark className="h-4 w-4" />}
+                  Create repo
+                </button>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSnapshot }) {
   const [snapshot, setSnapshot] = useState(initialSnapshot);
   const [devicePreset, setDevicePreset] = useState<DevicePreset>("desktop");
@@ -783,6 +1007,13 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const [isUploadingAttachments, setIsUploadingAttachments] = useState(false);
   const [homeQuery, setHomeQuery] = useState("");
   const [isShareMenuOpen, setIsShareMenuOpen] = useState(false);
+  const [isGitHubModalOpen, setIsGitHubModalOpen] = useState(false);
+  const [gitHubModalMode, setGitHubModalMode] = useState<"import" | "connect">("import");
+  const [gitHubRepos, setGitHubRepos] = useState<GitHubRepoSummary[]>([]);
+  const [isGitHubReposLoading, setIsGitHubReposLoading] = useState(false);
+  const [isGitHubSubmitting, setIsGitHubSubmitting] = useState(false);
+  const [newGitHubRepoName, setNewGitHubRepoName] = useState("");
+  const [newGitHubRepoPrivate, setNewGitHubRepoPrivate] = useState(true);
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([]);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -802,6 +1033,8 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const previousRevisionIdRef = useRef<string | null>(null);
 
   const currentProject = snapshot.currentProject;
+  const githubConnection = snapshot.githubConnection;
+  const githubBinding = currentProject?.githubBinding ?? null;
   const revisions = currentProject?.revisions ?? EMPTY_REVISIONS;
   const conversationTurns = currentProject?.conversationTurns ?? EMPTY_TURNS;
   const kits = currentProject?.kits ?? EMPTY_KITS;
@@ -918,6 +1151,77 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   useEffect(() => {
     setIsShareMenuOpen(false);
   }, [currentProject?.project.id]);
+
+  useEffect(() => {
+    const repoBaseName =
+      currentProject?.project.name
+        ?.trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "mymake-project";
+    setNewGitHubRepoName(repoBaseName);
+  }, [currentProject?.project.id, currentProject?.project.name]);
+
+  useEffect(() => {
+    if (!isGitHubModalOpen || !githubConnection.connected) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadRepos() {
+      setIsGitHubReposLoading(true);
+      try {
+        const response = await fetch("/api/github/repos", { cache: "no-store" });
+        const payload = await readJsonResponse<{ repos: GitHubRepoSummary[] }>(response);
+        if (!cancelled) {
+          setGitHubRepos(payload.repos);
+        }
+      } catch (caughtError) {
+        if (!cancelled) {
+          setError(
+            caughtError instanceof Error
+              ? caughtError.message
+              : "Could not load GitHub repos.",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setIsGitHubReposLoading(false);
+        }
+      }
+    }
+
+    void loadRepos();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [githubConnection.connected, isGitHubModalOpen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const url = new URL(window.location.href);
+    const githubState = url.searchParams.get("github");
+    if (!githubState) {
+      return;
+    }
+
+    if (githubState === "connected") {
+      setFeedback("GitHub connected. Choose a repo to import or link.");
+      setError(null);
+      setGitHubModalMode(currentProject ? "connect" : "import");
+      setIsGitHubModalOpen(true);
+    } else if (githubState === "failed") {
+      setError("GitHub connection failed. Please try again.");
+    }
+
+    url.searchParams.delete("github");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}`);
+  }, [currentProject]);
 
   useEffect(() => {
     const rail = leftRailScrollRef.current;
@@ -1101,7 +1405,9 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     syncBrowserLocation(nextSnapshot.currentProjectId);
     setError(null);
     clearComposerDiagnostics();
-    if (nextSnapshot.ai?.summary) {
+    if (nextSnapshot.feedback) {
+      setFeedback(nextSnapshot.feedback);
+    } else if (nextSnapshot.ai?.summary) {
       setFeedback(nextSnapshot.ai.summary);
     }
   }
@@ -1115,6 +1421,28 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     const response = await fetch(url.toString(), { cache: "no-store" });
     const data = await readJsonResponse<SnapshotResponse>(response);
     applySnapshot(data);
+  }
+
+  function openGitHubModal(mode: "import" | "connect") {
+    setGitHubModalMode(mode);
+    setIsGitHubModalOpen(true);
+    setError(null);
+  }
+
+  function startGitHubOAuth(mode: "import" | "connect") {
+    if (!githubConnection.configured) {
+      setError(
+        "GitHub OAuth is not configured yet. Add GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET first.",
+      );
+      return;
+    }
+
+    setGitHubModalMode(mode);
+    const redirectPath =
+      typeof window === "undefined"
+        ? "/"
+        : `${window.location.pathname}${window.location.search}`;
+    window.location.href = `/api/github/connect?redirect=${encodeURIComponent(redirectPath)}`;
   }
 
   async function handleProjectUpload(file: File) {
@@ -1373,6 +1701,166 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     window.location.href = "/auth";
   }
 
+  async function handleImportGitHubRepo(repo: GitHubRepoSummary) {
+    setIsGitHubSubmitting(true);
+    setError(null);
+    clearComposerDiagnostics();
+    setFeedback(`Importing ${repo.fullName} from GitHub...`);
+
+    try {
+      const response = await fetch("/api/github/import", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          owner: repo.owner,
+          repo: repo.name,
+        }),
+      });
+      const data = await readJsonResponse<SnapshotResponse>(response);
+      applySnapshot(data);
+      setIsGitHubModalOpen(false);
+      setFeedback(`Imported ${repo.fullName} into MyMake.`);
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Could not import this GitHub repo.",
+      );
+    } finally {
+      setIsGitHubSubmitting(false);
+    }
+  }
+
+  async function handleConnectProjectRepo(repo: GitHubRepoSummary) {
+    if (!currentProject) {
+      return;
+    }
+
+    setIsGitHubSubmitting(true);
+    setError(null);
+    clearComposerDiagnostics();
+    setFeedback(`Linking ${currentProject.project.name} to ${repo.fullName}...`);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${currentProject.project.id}/github/connect`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            mode: "existing",
+            owner: repo.owner,
+            repo: repo.name,
+          }),
+        },
+      );
+      await readJsonResponse<SnapshotResponse>(response);
+      const pushResponse = await fetch(
+        `/api/projects/${currentProject.project.id}/github/push`,
+        {
+          method: "POST",
+        },
+      );
+      const data = await readJsonResponse<SnapshotResponse>(pushResponse);
+      applySnapshot(data);
+      setIsGitHubModalOpen(false);
+      setFeedback(`Linked and pushed this project to ${repo.fullName}.`);
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Could not connect this project to GitHub.",
+      );
+    } finally {
+      setIsGitHubSubmitting(false);
+    }
+  }
+
+  async function handleCreateGitHubRepo() {
+    if (!currentProject || !newGitHubRepoName.trim()) {
+      return;
+    }
+
+    setIsGitHubSubmitting(true);
+    setError(null);
+    clearComposerDiagnostics();
+    setFeedback(`Creating ${newGitHubRepoName.trim()} on GitHub...`);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${currentProject.project.id}/github/connect`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            mode: "create",
+            name: newGitHubRepoName.trim(),
+            isPrivate: newGitHubRepoPrivate,
+          }),
+        },
+      );
+      await readJsonResponse<SnapshotResponse>(response);
+      const pushResponse = await fetch(
+        `/api/projects/${currentProject.project.id}/github/push`,
+        {
+          method: "POST",
+        },
+      );
+      const data = await readJsonResponse<SnapshotResponse>(pushResponse);
+      applySnapshot(data);
+      setIsGitHubModalOpen(false);
+      setFeedback(`Created, linked, and pushed ${newGitHubRepoName.trim()} on GitHub.`);
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Could not create the GitHub repo.",
+      );
+    } finally {
+      setIsGitHubSubmitting(false);
+    }
+  }
+
+  async function handleGitHubPush() {
+    if (!currentProject) {
+      return;
+    }
+
+    if (!githubConnection.connected || !githubBinding) {
+      openGitHubModal("connect");
+      return;
+    }
+
+    setIsGitHubSubmitting(true);
+    setError(null);
+    clearComposerDiagnostics();
+    setFeedback(
+      `Pushing ${currentCheckpointLabel} to ${githubBinding.owner}/${githubBinding.repo}...`,
+    );
+
+    try {
+      const response = await fetch(`/api/projects/${currentProject.project.id}/github/push`, {
+        method: "POST",
+      });
+      const data = await readJsonResponse<SnapshotResponse>(response);
+      applySnapshot(data);
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Could not push this project to GitHub.",
+      );
+    } finally {
+      setIsGitHubSubmitting(false);
+    }
+  }
+
   function goHome() {
     setSnapshot((previous) => ({
       ...previous,
@@ -1493,7 +1981,13 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           feedback={feedback}
           error={error}
           filteredProjects={filteredProjects}
+          githubConnection={githubConnection}
           homeQuery={homeQuery}
+          onImportRepo={() =>
+            githubConnection.connected
+              ? openGitHubModal("import")
+              : startGitHubOAuth("import")
+          }
           onDeleteProject={(project) => void handleDeleteProject(project)}
           onLogout={() => void handleLogout()}
           onOpenProject={(projectId) => void handleProjectChange(projectId)}
@@ -1503,6 +1997,26 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           projectNameCounts={projectNameCounts}
           totalProjects={snapshot.projects.length}
         />
+        {isGitHubModalOpen ? (
+          <GitHubModal
+            connection={githubConnection}
+            currentProject={currentProject}
+            isLoading={isGitHubReposLoading}
+            isSubmitting={isGitHubSubmitting}
+            mode={gitHubModalMode}
+            newRepoName={newGitHubRepoName}
+            newRepoPrivate={newGitHubRepoPrivate}
+            onClose={() => setIsGitHubModalOpen(false)}
+            onConnectGitHub={() => startGitHubOAuth(gitHubModalMode)}
+            onCreateRepo={() => void handleCreateGitHubRepo()}
+            onImportRepo={(repo) => void handleImportGitHubRepo(repo)}
+            onNewRepoNameChange={setNewGitHubRepoName}
+            onNewRepoPrivateChange={setNewGitHubRepoPrivate}
+            onRepoConnect={(repo) => void handleConnectProjectRepo(repo)}
+            onSetMode={setGitHubModalMode}
+            repos={gitHubRepos}
+          />
+        ) : null}
         {sharedInputs}
       </>
     );
@@ -1584,6 +2098,28 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
             </ToolbarIconButton>
 
             <div className="ml-auto flex items-center gap-2">
+              <ToolbarIconButton
+                label={
+                  githubBinding
+                    ? `Push ${currentCheckpointLabel} to ${githubBinding.owner}/${githubBinding.repo}`
+                    : "Connect this project to GitHub"
+                }
+                active={Boolean(githubBinding)}
+                onClick={() => {
+                  if (githubBinding && githubConnection.connected) {
+                    void handleGitHubPush();
+                    return;
+                  }
+
+                  openGitHubModal("connect");
+                }}
+              >
+                {isGitHubSubmitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <GitHubMark className="h-4 w-4" />
+                )}
+              </ToolbarIconButton>
               <ToolbarIconButton
                 label={isCodePanelOpen ? "Close code panel" : "Open code panel"}
                 active={isCodePanelOpen}
@@ -2324,6 +2860,26 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
         </div>
       </div>
 
+      {isGitHubModalOpen ? (
+        <GitHubModal
+          connection={githubConnection}
+          currentProject={currentProject}
+          isLoading={isGitHubReposLoading}
+          isSubmitting={isGitHubSubmitting}
+          mode={gitHubModalMode}
+          newRepoName={newGitHubRepoName}
+          newRepoPrivate={newGitHubRepoPrivate}
+          onClose={() => setIsGitHubModalOpen(false)}
+          onConnectGitHub={() => startGitHubOAuth(gitHubModalMode)}
+          onCreateRepo={() => void handleCreateGitHubRepo()}
+          onImportRepo={(repo) => void handleImportGitHubRepo(repo)}
+          onNewRepoNameChange={setNewGitHubRepoName}
+          onNewRepoPrivateChange={setNewGitHubRepoPrivate}
+          onRepoConnect={(repo) => void handleConnectProjectRepo(repo)}
+          onSetMode={setGitHubModalMode}
+          repos={gitHubRepos}
+        />
+      ) : null}
       {sharedInputs}
     </main>
   );

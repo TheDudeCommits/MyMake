@@ -30,6 +30,12 @@ const AI_MODELS: ServerAiModelConfig[] = [
     apiModel: "gpt-5.2-chat-latest",
   },
   {
+    key: "openai-codex",
+    label: "Codex",
+    provider: "openai",
+    apiModel: "gpt-5.3-codex",
+  },
+  {
     key: "anthropic-sonnet-4-6",
     label: "Claude Sonnet 4.6",
     provider: "anthropic",
@@ -38,6 +44,10 @@ const AI_MODELS: ServerAiModelConfig[] = [
 ];
 
 export const DEFAULT_AI_MODEL_KEY: AiModelKey = "anthropic-sonnet-4-6";
+
+export function isCodexModel(aiModelKey?: AiModelKey | null): boolean {
+  return aiModelKey === "openai-codex";
+}
 
 export function listAiModels(): AiModelOption[] {
   const env = getEnv();
@@ -60,7 +70,7 @@ function resolveAiModel(aiModelKey?: AiModelKey | null): ServerAiModelConfig {
     AI_MODELS[0];
 
   if (model.provider === "openai" && !getEnv().openaiApiKey) {
-    throw new Error("OpenAI ChatGPT 5.2 is not configured. Add OPENAI_API_KEY to use it.");
+    throw new Error(`Add OPENAI_API_KEY to use ${model.label}.`);
   }
 
   if (model.provider === "anthropic" && !getEnv().anthropicApiKey) {

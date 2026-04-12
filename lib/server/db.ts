@@ -116,6 +116,31 @@ const SCHEMA_SQL = `
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS github_connections (
+    id TEXT PRIMARY KEY,
+    login TEXT NOT NULL,
+    name TEXT,
+    avatar_url TEXT,
+    access_token TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS project_github_bindings (
+    project_id TEXT PRIMARY KEY,
+    github_connection_id TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    default_branch TEXT NOT NULL,
+    remote_url TEXT NOT NULL,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (github_connection_id) REFERENCES github_connections(id) ON DELETE CASCADE
+  );
+
   CREATE INDEX IF NOT EXISTS idx_projects_last_opened_at
     ON projects(last_opened_at DESC);
 
@@ -136,6 +161,9 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_validation_results_project_created_at
     ON validation_results(project_id, created_at DESC);
+
+  CREATE INDEX IF NOT EXISTS idx_project_github_bindings_owner_repo
+    ON project_github_bindings(owner, repo);
 `;
 
 function ensureColumn(

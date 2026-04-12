@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { DEFAULT_AI_MODEL_KEY, listAiModels } from "@/lib/server/ai";
+import { getGitHubConnectionStatus } from "@/lib/server/github";
 import { getWorkspaceSnapshot, listProjects } from "@/lib/server/project-service";
 
 export const runtime = "nodejs";
@@ -20,6 +21,7 @@ export async function GET(
       projects: await listProjects(),
       currentProjectId: params.projectId,
       currentProject: workspace,
+      githubConnection: getGitHubConnectionStatus(),
       aiModels: listAiModels(),
       defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
     });

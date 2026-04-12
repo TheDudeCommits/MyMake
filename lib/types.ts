@@ -4,10 +4,14 @@ export type RevisionSource = "upload" | "ai" | "manual" | "undo" | "redo";
 export type DevicePreset = "desktop" | "tablet" | "mobile";
 export type ProjectRuntime = "next" | "vite" | "static";
 export type AiProvider = "openai" | "anthropic";
-export type AiModelKey = "openai-chatgpt-5-2" | "anthropic-sonnet-4-6";
+export type AiModelKey =
+  | "openai-chatgpt-5-2"
+  | "openai-codex"
+  | "anthropic-sonnet-4-6";
 export type EditMode = "precise" | "scoped" | "creative";
 export type MakeKitKind = "code" | "style" | "rules" | "reference";
 export type MakeKitSource = "system" | "user" | "imported";
+export type ProjectGitHubSource = "imported" | "linked" | "created";
 export type ContextSourceKind =
   | "selection"
   | "route"
@@ -103,6 +107,38 @@ export interface PreviewDescriptor {
   status: "ready" | "starting" | "error";
   port: number | null;
   instanceId: string | null;
+}
+
+export interface GitHubConnectionRecord {
+  configured: boolean;
+  connected: boolean;
+  login: string | null;
+  name: string | null;
+  avatarUrl: string | null;
+}
+
+export interface GitHubRepoSummary {
+  id: number;
+  owner: string;
+  name: string;
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  cloneUrl: string;
+  htmlUrl: string;
+  updatedAt: string;
+}
+
+export interface ProjectGitHubBindingRecord {
+  projectId: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  defaultBranch: string;
+  remoteUrl: string;
+  source: ProjectGitHubSource;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AiModelOption {
@@ -224,6 +260,7 @@ export interface ProjectWorkspace {
   conversationTurns: ConversationTurnRecord[];
   attachments: AttachmentRecord[];
   kits: MakeKitRecord[];
+  githubBinding: ProjectGitHubBindingRecord | null;
   fileTree: FileNode[];
   currentFilePath: string | null;
   currentFileContent: string | null;
@@ -236,6 +273,7 @@ export interface DashboardSnapshot {
   projects: ProjectRecord[];
   currentProjectId: string | null;
   currentProject: ProjectWorkspace | null;
+  githubConnection: GitHubConnectionRecord;
   aiModels: AiModelOption[];
   defaultAiModelKey: AiModelKey;
 }

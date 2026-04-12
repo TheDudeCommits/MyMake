@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { DEFAULT_AI_MODEL_KEY, listAiModels } from "@/lib/server/ai";
+import { getGitHubConnectionStatus } from "@/lib/server/github";
 import {
   listProjects,
   redoProject,
@@ -37,6 +38,7 @@ export async function POST(
       projects: await listProjects(),
       currentProjectId: params.projectId,
       currentProject: workspace,
+      githubConnection: getGitHubConnectionStatus(),
       aiModels: listAiModels(),
       defaultAiModelKey: DEFAULT_AI_MODEL_KEY,
     });
