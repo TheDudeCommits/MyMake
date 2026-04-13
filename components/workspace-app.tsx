@@ -1038,6 +1038,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const [expandedTurnIds, setExpandedTurnIds] = useState<string[]>([]);
   const [isPreviewFrameReady, setIsPreviewFrameReady] = useState(false);
   const [isPreviewSlow, setIsPreviewSlow] = useState(false);
+  const [previewNonce, setPreviewNonce] = useState(0);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const leftRailScrollRef = useRef<HTMLDivElement>(null);
@@ -1066,6 +1067,22 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const previewIdentity = currentProject
     ? `${currentProject.project.id}:${currentProject.preview.instanceId ?? "cold"}`
     : null;
+  const previewFrameSrc = useMemo(() => {
+    if (!currentProject) {
+      return null;
+    }
+
+    const searchParams = new URLSearchParams({
+      instance: currentProject.preview.instanceId ?? "cold",
+      revision: currentProject.project.currentRevisionId ?? "none",
+      refresh: String(previewNonce),
+    });
+
+    return `${currentProject.preview.url}/?${searchParams.toString()}`;
+  }, [
+    currentProject,
+    previewNonce,
+  ]);
   const isPreviewStarting = Boolean(currentProject && currentProject.preview.status === "starting");
   const enabledAiModels = useMemo(
     () => snapshot.aiModels.filter((model) => model.enabled),
@@ -1161,6 +1178,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     setSelectedElement(null);
     setCurrentRoute("/");
     setExpandedTurnIds([]);
+    setPreviewNonce(0);
     clearComposerDiagnostics();
   }, [currentProject?.project.id]);
 
@@ -1305,6 +1323,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     }
 
     previousPreviewIdentityRef.current = previewIdentity;
+    setPreviewNonce((value) => value + 1);
     setIsPreviewFrameReady(false);
     setIsPreviewSlow(false);
 
@@ -1334,7 +1353,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     setIsPreviewFrameReady(false);
     setIsPreviewSlow(false);
-    void iframeRef.current?.contentWindow?.location.reload();
+    setPreviewNonce((value) => value + 1);
   }, [currentProject?.project.currentRevisionId, currentProject?.project.id, previewIdentity]);
 
   useEffect(() => {
@@ -2693,7 +2712,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                       key={`${currentProject.project.id}-${currentProject.preview.instanceId ?? "cold"}`}
                       ref={iframeRef}
                       title={`${currentProject.project.name} preview`}
-                      src={`${currentProject.preview.url}/`}
+                      src={previewFrameSrc || `${currentProject.preview.url}/`}
                       className={clsx(
                         "w-full bg-[#12141a]",
                         isDesktopPreview
@@ -2743,8 +2762,8 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                                 onClick={() => {
                                   setIsPreviewFrameReady(false);
                                   setIsPreviewSlow(false);
+                                  setPreviewNonce((value) => value + 1);
                                   void refreshProject(currentProject.project.id, editorFilePath);
-                                  void iframeRef.current?.contentWindow?.location.reload();
                                 }}
                               >
                                 Reconnect preview

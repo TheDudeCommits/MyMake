@@ -126,6 +126,12 @@ function getCookieValue(
   return null;
 }
 
+function setNoStoreHeaders(res: Response): void {
+  res.setHeader("Cache-Control", "no-store, no-cache, max-age=0, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
+
 function injectPreviewBridge(html: string, projectId: string): string {
   const bootstrap = `<script>${buildPreviewBootstrapScript(projectId)}</script>`;
   const bridge = `<script>${buildPreviewBridgeScript(projectId)}</script>`;
@@ -276,6 +282,7 @@ function isHtmlRequest(request: Request): boolean {
 async function previewAuthGuard(req: Request, res: Response, nextFn: NextFunction) {
   const session = readSessionCookieValue(getCookieValue(req.headers.cookie, "mymake-session"));
   const projectId = resolvePreviewProjectId(req);
+  setNoStoreHeaders(res);
 
   if (!session) {
     res.status(401).send("Unauthorized preview request.");
@@ -510,6 +517,7 @@ app.prepare().then(() => {
 
     if (!isPublicPreviewLocation(req.headers.referer)) {
       const session = readSessionCookieValue(getCookieValue(req.headers.cookie, "mymake-session"));
+      setNoStoreHeaders(res);
       if (!session) {
         res.status(401).send("Unauthorized preview request.");
         return;
