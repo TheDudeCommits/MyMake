@@ -24,6 +24,10 @@ const selectionSchema = z
     href: z.string().nullable(),
     src: z.string().nullable(),
     editableProperties: z.array(z.string()).default([]),
+    fingerprint: z.string().optional(),
+    instanceScope: z.string().nullable().optional(),
+    contextTexts: z.array(z.string()).optional(),
+    visualType: z.string().nullable().optional(),
     boundingBox: z.object({
       x: z.number(),
       y: z.number(),
@@ -45,6 +49,24 @@ const bodySchema = z.object({
     .nullable()
     .optional(),
   currentFilePath: z.string().nullable().optional(),
+  inspectorAction: z
+    .object({
+      kind: z.enum([
+        "replace-text",
+        "set-line-color",
+        "set-fill-color",
+        "set-background-color",
+        "set-spacing",
+        "set-radius",
+        "set-size",
+        "set-visibility",
+        "swap-image",
+      ]),
+      value: z.string().nullable().optional(),
+      axis: z.enum(["all", "x", "y"]).nullable().optional(),
+    })
+    .nullable()
+    .optional(),
 });
 
 export async function POST(

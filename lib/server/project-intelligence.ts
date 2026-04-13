@@ -13,12 +13,16 @@ import type {
   ContextSourceKind,
   ContextSourceRecord,
   ConversationTurnRecord,
+  EditIntent,
+  EditIntentKind,
   EditMode,
   EditPlan,
   MakeKitRecord,
   PackageManager,
   ProjectRuntime,
+  ResolvedHandle,
   SelectionPayload,
+  SelectionSourceCandidate,
   SelectionTarget,
   ValidationCheckStatus,
 } from "@/lib/types";
@@ -508,6 +512,25 @@ function inferEditableCapabilities(selection: SelectionPayload): SelectionTarget
     add("link", "Link", 0.92);
   }
 
+  if (
+    selection.editableProperties.includes("line-color") ||
+    Boolean(selection.attributes.stroke) ||
+    selection.visualType === "chart-line"
+  ) {
+    add("line-color", "Line color", 0.96);
+    add("color", "Colors", 0.86);
+  }
+
+  if (
+    selection.editableProperties.includes("fill-color") ||
+    Boolean(selection.attributes.fill) ||
+    selection.visualType === "chart-area"
+  ) {
+    add("fill-color", "Fill color", 0.94);
+    add("background", "Background", 0.84);
+    add("color", "Colors", 0.82);
+  }
+
   if (["button", "a"].includes(selection.tagName) || /\bbutton\b/i.test(selection.classes.join(" "))) {
     add("spacing", "Spacing", 0.82);
     add("radius", "Radius", 0.74);
@@ -522,6 +545,223 @@ function inferEditableCapabilities(selection: SelectionPayload): SelectionTarget
     label: value.label,
     confidence: value.confidence,
   }));
+}
+
+function buildSelectionFingerprint(selection: SelectionPayload): string {
+  if (selection.fingerprint) {
+    return selection.fingerprint;
+  }
+
+  return createHash("sha1")
+    .update(
+      JSON.stringify({
+        route: selection.route,
+        selector: selection.selector,
+        scopeSelector: selection.scopeSelector,
+        scopedSelector: selection.scopedSelector,
+        text: selection.textContent.slice(0, 160),
+        framerPath: selection.framerPath,
+      }),
+    )
+    .digest("hex");
+}
+
+function inferSelectionLabel(selection: SelectionPayload): string {
+  const trimmedText = selection.textContent.replace(/\s+/g, " ").trim();
+  return (
+    selection.nearestFramerName ||
+    selection.contextTexts?.find((value) => value.trim()) ||
+    trimmedText.slice(0, 80) ||
+    humanizeIdentifier(selection.tagName)
+  );
+}
+
+function inferResolvedHandles(selection: SelectionPayload): ResolvedHandle[] {
+  const handles = new Map<string, ResolvedHandle>();
+  const add = (key: string, label: string, confidence: number, currentValue?: string | null) => {
+    const previous = handles.get(key);
+    if (!previous || previous.confidence < confidence) {
+      handles.set(key, {
+        key,
+        label,
+        confidence,
+        currentValue: currentValue || null,
+      });
+    }
+  };
+
+  if (selection.textContent.trim()) {
+    add("text", "Text content", 0.96, selection.textContent.trim().slice(0, 120));
+  }
+  if (selection.attributes.stroke) {
+    add("line-color", "Line color", 0.98, selection.attributes.stroke);
+  }
+  if (selection.attributes.fill && selection.attributes.fill !== "none") {
+    add("fill-color", "Fill color", 0.96, selection.attributes.fill);
+  }
+  if (selection.attributes["background-color"]) {
+    add("background-color", "Background", 0.9, selection.attributes["background-color"]);
+  }
+  if (selection.src) {
+    add("image", "Image source", 0.95, selection.src);
+  }
+  if (selection.editableProperties.includes("spacing")) {
+    add("spacing", "Spacing", 0.78);
+  }
+  if (selection.editableProperties.includes("radius")) {
+    add("radius", "Border radius", 0.74);
+  }
+  add("visibility", "Visibility", 0.9);
+
+  return [...handles.values()].sort((left, right) => right.confidence - left.confidence);
+}
+
+function collectSelectionSearchTerms(selection: SelectionPayload): string[] {
+  return unique([
+    selection.nearestFramerName || "",
+    selection.textContent || "",
+    ...(selection.contextTexts || []),
+    ...selection.framerPath,
+    ...selection.classes,
+    selection.visualType || "",
+  ])
+    .flatMap((value) => splitKeywords(value))
+    .filter(Boolean);
+}
+
+function collectSelectionPhrases(selection: SelectionPayload): string[] {
+  return unique([
+    selection.nearestFramerName || "",
+    selection.textContent || "",
+    ...(selection.contextTexts || []),
+  ])
+    .map((value) => value.replace(/\s+/g, " ").trim())
+    .filter((value) => value.length >= 3)
+    .slice(0, 8);
+}
+
+function scoreFileCandidate(params: {
+  filePath: string;
+  content: string | null;
+  route: string;
+  currentFilePath: string | null | undefined;
+  selection: SelectionPayload;
+  componentIndex: ComponentIndexFile;
+  routeCandidates: Set<string>;
+  searchTerms: string[];
+  phrases: string[];
+}): SelectionSourceCandidate {
+  const matchedTerms = new Set<string>();
+  const reasons: string[] = [];
+  let score = 0;
+
+  if (params.routeCandidates.has(params.filePath)) {
+    score += 60;
+    reasons.push("matches current route");
+  }
+  if (params.currentFilePath && params.filePath === params.currentFilePath) {
+    score += 55;
+    reasons.push("active editor file");
+  }
+
+  const componentEntries = params.componentIndex.components.filter(
+    (entry) => entry.filePath === params.filePath,
+  );
+  for (const entry of componentEntries) {
+    if (entry.route === params.route) {
+      score += 22;
+      reasons.push("component mapped to route");
+    }
+    for (const term of params.searchTerms) {
+      if (entry.keywords.includes(term)) {
+        score += 14;
+        matchedTerms.add(term);
+      }
+    }
+  }
+
+  if (params.content) {
+    const normalizedContent = params.content.toLowerCase();
+    for (const phrase of params.phrases) {
+      if (normalizedContent.includes(phrase.toLowerCase())) {
+        score += 30;
+        reasons.push(`contains "${phrase.slice(0, 48)}"`);
+      }
+    }
+
+    for (const term of params.searchTerms) {
+      if (normalizedContent.includes(term)) {
+        score += 4;
+        matchedTerms.add(term);
+      }
+    }
+
+    if (
+      params.selection.visualType === "chart-line" &&
+      /\b(line|stroke|chart|trend|spark)\b/i.test(params.content)
+    ) {
+      score += 24;
+      reasons.push("contains chart line styling");
+    }
+    if (
+      params.selection.visualType === "chart-area" &&
+      /\b(area|fill|gradient|chart)\b/i.test(params.content)
+    ) {
+      score += 20;
+      reasons.push("contains chart fill styling");
+    }
+    if (params.selection.attributes.stroke && params.content.includes(params.selection.attributes.stroke)) {
+      score += 22;
+      reasons.push("contains current stroke value");
+    }
+    if (
+      params.selection.attributes.fill &&
+      params.selection.attributes.fill !== "none" &&
+      params.content.includes(params.selection.attributes.fill)
+    ) {
+      score += 18;
+      reasons.push("contains current fill value");
+    }
+  }
+
+  return {
+    path: params.filePath,
+    score,
+    reason: unique(reasons).slice(0, 4).join("; ") || "supporting selection context",
+    matchedTerms: [...matchedTerms].slice(0, 8),
+  };
+}
+
+function inferConfidenceFromCandidates(
+  candidates: SelectionSourceCandidate[],
+  selection: SelectionPayload,
+): number {
+  const top = candidates[0];
+  if (!top) {
+    return 0.18;
+  }
+
+  let confidence = Math.min(0.98, 0.2 + top.score / 180);
+  if (top.reason.includes("contains")) {
+    confidence += 0.08;
+  }
+  if (selection.attributes.stroke && top.reason.includes("stroke")) {
+    confidence += 0.06;
+  }
+  if (selection.textContent && top.reason.includes("contains")) {
+    confidence += 0.06;
+  }
+  const next = candidates[1];
+  if (next) {
+    const gap = top.score - next.score;
+    if (gap >= 35) {
+      confidence += 0.08;
+    } else if (gap <= 10) {
+      confidence -= 0.08;
+    }
+  }
+
+  return Math.max(0.12, Math.min(0.98, confidence));
 }
 
 function guessRepeatGroup(selection: SelectionPayload): string | null {
@@ -553,72 +793,87 @@ export async function buildSelectionTarget(params: {
     return null;
   }
 
-  const searchTerms = unique([
-    selection.nearestFramerName || "",
-    selection.textContent || "",
-    ...selection.framerPath,
-    ...selection.classes,
-  ])
-    .flatMap((value) => splitKeywords(value))
-    .filter(Boolean);
-
   const files = await walkProjectFiles(params.projectDir);
   const routeCandidates = new Set(routeFileCandidates(params.route));
-  const fileScores = new Map<string, number>();
-
-  const scoreFile = (filePath: string, amount: number) => {
-    fileScores.set(filePath, (fileScores.get(filePath) || 0) + amount);
-  };
-
-  for (const file of files) {
-    if (routeCandidates.has(file)) {
-      scoreFile(file, 60);
-    }
-    if (params.currentFilePath && file === params.currentFilePath) {
-      scoreFile(file, 50);
-    }
-  }
-
-  for (const entry of params.componentIndex.components) {
-    let score = 0;
-    if (entry.route === params.route) {
-      score += 30;
-    }
-    for (const term of searchTerms) {
-      if (entry.keywords.includes(term)) {
-        score += 18;
-      }
-    }
-    if (score > 0) {
-      scoreFile(entry.filePath, score);
-    }
-  }
+  const searchTerms = collectSelectionSearchTerms(selection);
+  const phrases = collectSelectionPhrases(selection);
+  const seededFiles = unique(
+    [
+      ...files.filter((filePath) => routeCandidates.has(filePath)),
+      params.currentFilePath || "",
+      ...params.componentIndex.components
+        .filter((entry) => {
+          if (entry.route === params.route) {
+            return true;
+          }
+          return searchTerms.some((term) => entry.keywords.includes(term));
+        })
+        .map((entry) => entry.filePath),
+    ].filter(Boolean),
+  );
+  const candidateFiles = unique([...seededFiles, ...files]).slice(0, Math.max(20, seededFiles.length + 8));
+  const sourceCandidates = (
+    await Promise.all(
+      candidateFiles.map(async (filePath) =>
+        scoreFileCandidate({
+          filePath,
+          content: await readTextFile(params.projectDir, filePath),
+          route: params.route,
+          currentFilePath: params.currentFilePath,
+          selection,
+          componentIndex: params.componentIndex,
+          routeCandidates,
+          searchTerms,
+          phrases,
+        }),
+      ),
+    )
+  )
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
+    .slice(0, 5);
 
   const likelySourceFilePath =
-    [...fileScores.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ||
-    params.currentFilePath ||
-    null;
+    sourceCandidates[0]?.path || params.currentFilePath || routeFileCandidates(params.route)[0] || null;
 
   const componentName =
     params.componentIndex.components.find((entry) => entry.filePath === likelySourceFilePath)?.name ||
     (selection.nearestFramerName ? humanizeIdentifier(selection.nearestFramerName) : humanizeIdentifier(selection.tagName));
+  const fingerprint = buildSelectionFingerprint(selection);
+  const confidence = inferConfidenceFromCandidates(sourceCandidates, selection);
+  const repeatGroup = guessRepeatGroup(selection);
+  const instanceScope =
+    selection.instanceScope ||
+    selection.scopeSelector ||
+    (repeatGroup ? humanizeIdentifier(repeatGroup) : null);
 
   return {
+    targetId: createHash("sha1")
+      .update(`${selection.route}:${fingerprint}:${likelySourceFilePath || "none"}`)
+      .digest("hex")
+      .slice(0, 16),
+    fingerprint,
     route: selection.route,
-    label: selection.nearestFramerName || componentName || selection.tagName,
+    label: inferSelectionLabel(selection),
     summary:
+      selection.contextTexts?.join(" / ") ||
       selection.textContent ||
       selection.nearestFramerName ||
       selection.scopedSelector ||
       selection.selector ||
       selection.domPath,
     sourceFilePath: likelySourceFilePath,
+    sourceCandidates,
+    confidence,
     componentName,
     sectionName:
       selection.framerPath.at(-1) ||
       selection.nearestFramerName ||
       humanizeIdentifier(selection.route === "/" ? "Home" : selection.route),
-    repeatGroup: guessRepeatGroup(selection),
+    repeatGroup,
+    instanceScope,
+    visualType: selection.visualType || null,
+    resolvedHandles: inferResolvedHandles(selection),
     editableCapabilities: inferEditableCapabilities(selection),
     payload: selection,
   };
@@ -749,6 +1004,18 @@ export async function collectContextGraph(params: {
       addFileScore(filePath, "selection", 150, "Likely source file for the selected element");
     }
 
+    const rankedCandidate = params.selectionTarget?.sourceCandidates.find(
+      (candidate) => candidate.path === filePath,
+    );
+    if (rankedCandidate) {
+      addFileScore(
+        filePath,
+        "selection",
+        140 + Math.min(42, rankedCandidate.score),
+        `Resolved target candidate: ${rankedCandidate.reason}`,
+      );
+    }
+
     if (STYLE_FILE_HINTS.some((hint) => filePath.includes(hint))) {
       addFileScore(filePath, "style", 88, "Shared style or theme context");
     }
@@ -829,7 +1096,7 @@ export async function collectContextGraph(params: {
 
   const orderedFiles = [...fileScores.entries()]
     .sort((left, right) => right[1].score - left[1].score || left[0].localeCompare(right[0]))
-    .slice(0, 12);
+    .slice(0, params.selectionTarget ? 8 : 12);
 
   const contextFiles: ContextFile[] = [];
   let totalChars = 0;
@@ -882,10 +1149,34 @@ export async function collectContextGraph(params: {
   };
 }
 
-function findDirectPropertyIntent(
-  prompt: string,
-  target: SelectionTarget | null,
-): { type: "text" | "remove" | null; confidence: number } {
+function extractColorValue(prompt: string): string | null {
+  const hexMatch = prompt.match(/#[0-9a-f]{3,8}\b/i);
+  if (hexMatch?.[0]) {
+    return hexMatch[0];
+  }
+
+  const namedColorMatch = prompt.match(
+    /\b(red|green|blue|white|black|gray|grey|orange|yellow|purple|pink|emerald|teal|cyan)\b/i,
+  );
+  return namedColorMatch?.[1] || null;
+}
+
+function resolveEditIntent(params: {
+  prompt: string;
+  target: SelectionTarget | null;
+  inspectorAction?: { kind: string; value?: string | null } | null;
+}): EditIntent {
+  if (params.inspectorAction) {
+    return {
+      kind: params.inspectorAction.kind as EditIntentKind,
+      confidence: 0.99,
+      requestedValue: params.inspectorAction.value || null,
+      summary: `Inspector action: ${params.inspectorAction.kind}`,
+    };
+  }
+
+  const prompt = params.prompt;
+  const target = params.target;
   const normalized = prompt.toLowerCase();
   const hasQuotedReplacementIntent =
     /\b(change|replace|rename)\b[\s\S]*["“'`].+?["”'`][\s\S]*\b(to|with)\b[\s\S]*["“'`]?.+$/i.test(
@@ -893,11 +1184,16 @@ function findDirectPropertyIntent(
     );
 
   if (!target && !hasQuotedReplacementIntent) {
-    return { type: null, confidence: 0 };
+    return { kind: "unknown", confidence: 0.18, summary: "No stable target resolved yet." };
   }
 
   if (/\b(remove|delete|hide)\b/.test(normalized)) {
-    return { type: "remove", confidence: 0.92 };
+    return {
+      kind: "set-visibility",
+      confidence: 0.92,
+      requestedValue: "hidden",
+      summary: "Hide or remove the selected target.",
+    };
   }
 
   if (
@@ -905,10 +1201,76 @@ function findDirectPropertyIntent(
       (/\b(change|replace|rename)\b/.test(normalized) &&
         Boolean(target?.editableCapabilities.some((item) => item.key === "text"))))
   ) {
-    return { type: "text", confidence: 0.88 };
+    return {
+      kind: "replace-text",
+      confidence: 0.9,
+      summary: "Replace the selected text content.",
+    };
   }
 
-  return { type: null, confidence: 0 };
+  const requestedColor = extractColorValue(prompt);
+  if (
+    requestedColor &&
+    /\b(line|stroke|sparkline|chart line|trend line)\b/.test(normalized) &&
+    Boolean(target?.resolvedHandles.some((handle) => handle.key === "line-color"))
+  ) {
+    return {
+      kind: "set-line-color",
+      confidence: 0.9,
+      requestedValue: requestedColor,
+      currentValue:
+        target?.resolvedHandles.find((handle) => handle.key === "line-color")?.currentValue || null,
+      summary: "Update only the line or stroke color.",
+    };
+  }
+
+  if (
+    requestedColor &&
+    /\b(fill|shade|background|area|card background)\b/.test(normalized) &&
+    Boolean(
+      target?.resolvedHandles.some(
+        (handle) => handle.key === "fill-color" || handle.key === "background-color",
+      ),
+    )
+  ) {
+    return {
+      kind:
+        target?.resolvedHandles.some((handle) => handle.key === "background-color")
+          ? "set-background-color"
+          : "set-fill-color",
+      confidence: 0.86,
+      requestedValue: requestedColor,
+      summary: "Update the selected fill or background color.",
+    };
+  }
+
+  if (
+    /\b(radius|rounded|corner)\b/.test(normalized) &&
+    Boolean(target?.editableCapabilities.some((item) => item.key === "radius"))
+  ) {
+    return {
+      kind: "set-radius",
+      confidence: 0.8,
+      summary: "Adjust border radius on the selected target.",
+    };
+  }
+
+  if (
+    /\b(gap|padding|margin|spacing)\b/.test(normalized) &&
+    Boolean(target?.editableCapabilities.some((item) => item.key === "spacing"))
+  ) {
+    return {
+      kind: "set-spacing",
+      confidence: 0.8,
+      summary: "Adjust spacing on the selected target.",
+    };
+  }
+
+  return {
+    kind: "unknown",
+    confidence: target ? Math.max(0.42, target.confidence - 0.08) : 0.22,
+    summary: "This edit likely needs a constrained AI pass.",
+  };
 }
 
 export function inferEditMode(params: {
@@ -958,37 +1320,65 @@ export function buildEditPlan(params: {
   selectionTarget: SelectionTarget | null;
   contextGraph: ContextGraphResult;
   hasStaticEditableSupport: boolean;
+  inspectorAction?: { kind: string; value?: string | null } | null;
 }): EditPlan {
   const resolvedEditMode =
     params.editMode ||
     inferEditMode({
       prompt: params.prompt,
-      selectionTarget: params.selectionTarget,
-      runtime: params.runtime,
-    });
-  const directIntent = findDirectPropertyIntent(params.prompt, params.selectionTarget);
+        selectionTarget: params.selectionTarget,
+        runtime: params.runtime,
+      });
+  const intent = resolveEditIntent({
+    prompt: params.prompt,
+    target: params.selectionTarget,
+    inspectorAction: params.inspectorAction,
+  });
   const isLargeActiveFile = Boolean(params.currentFileContent && params.currentFileContent.length > 120_000);
+  const confidence = params.selectionTarget
+    ? Math.min(0.99, (params.selectionTarget.confidence + intent.confidence) / 2)
+    : intent.confidence;
+  const allowedFiles = unique(
+    [
+      params.selectionTarget?.sourceFilePath || "",
+      ...(params.selectionTarget?.sourceCandidates || []).map((candidate) => candidate.path),
+      ...params.contextGraph.candidateFiles.slice(0, resolvedEditMode === "creative" ? 8 : 5),
+    ].filter(Boolean),
+  );
+  const allowedProperties = unique(
+    [
+      ...((params.selectionTarget?.resolvedHandles || []).map((handle) => handle.key)),
+      intent.kind,
+    ].filter(Boolean),
+  );
+  const lane =
+    intent.kind !== "unknown" && confidence >= 0.72
+      ? "deterministic"
+      : params.selectionTarget && confidence >= 0.48
+        ? "scoped-ai"
+        : "deep-fix";
   const strategy =
-    directIntent.type === "text"
+    lane === "deterministic"
       ? "direct-property"
       : params.runtime === "static" && params.hasStaticEditableSupport && params.selectionTarget
         ? "static-override"
-        : isLargeActiveFile || resolvedEditMode === "precise"
+        : lane === "deep-fix" || isLargeActiveFile || resolvedEditMode === "precise"
           ? "patch"
           : "rewrite";
 
   const risk =
-    strategy === "direct-property" || strategy === "static-override"
+    lane === "deterministic" || strategy === "static-override"
       ? "low"
-      : resolvedEditMode === "creative"
+      : lane === "deep-fix" || resolvedEditMode === "creative"
         ? "high"
         : "medium";
 
   const rationale = [
     params.selectionTarget
-      ? `Targeting ${params.selectionTarget.label} on ${params.selectionTarget.route}.`
+      ? `Targeting ${params.selectionTarget.label} on ${params.selectionTarget.route} with ${(confidence * 100).toFixed(0)}% confidence.`
       : "No exact element selected, so the edit will use route and file context.",
     `Edit mode is ${resolvedEditMode}.`,
+    `Execution lane is ${lane}.`,
     strategy === "patch"
       ? "Using patch mode to constrain file changes."
       : strategy === "rewrite"
@@ -1002,9 +1392,15 @@ export function buildEditPlan(params: {
     mode: resolvedEditMode,
     target: params.selectionTarget,
     strategy,
+    lane,
+    intent,
     risk,
     candidateFiles: params.contextGraph.candidateFiles.slice(0, resolvedEditMode === "creative" ? 8 : 5),
-    validationSet: ["imports", "preview", ...(params.selectionTarget ? ["selector"] : []), "design"],
+    allowedFiles,
+    allowedProperties,
+    confidence,
+    requiresConfirmation: Boolean(params.selectionTarget) && confidence < 0.4,
+    validationSet: ["imports", "preview", ...(params.selectionTarget ? ["selector"] : []), "design", "target"],
     rationale,
   };
 }

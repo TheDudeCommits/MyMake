@@ -94,8 +94,11 @@ import type {
   ContextSnapshotRecord,
   ConversationTurnRecord,
   DashboardSnapshot,
+  EditIntent,
+  EditTelemetryRecord,
   EditMode,
   EditPlan,
+  ExecutionLane,
   GitHubRepoSummary,
   MakeKitRecord,
   PackageManager,
@@ -106,6 +109,7 @@ import type {
   RevisionRecord,
   SelectionPayload,
   SelectionTarget,
+  TargetValidationResult,
   ValidationResultRecord,
 } from "@/lib/types";
 
@@ -250,6 +254,9 @@ function mapValidationResultRow(row: Record<string, unknown>): ValidationResultR
     details: safeParseJson(row.details_json, []),
     rawProviderOutput: row.raw_provider_output ? String(row.raw_provider_output) : null,
     retryable: Boolean(row.retryable),
+    executionLane: row.execution_lane ? (String(row.execution_lane) as ExecutionLane) : null,
+    editIntent: row.edit_intent ? (String(row.edit_intent) as EditIntent["kind"]) : null,
+    targetValidation: safeParseJson<TargetValidationResult | null>(row.target_validation_json, null),
     createdAt: String(row.created_at),
   };
 }
@@ -1429,6 +1436,9 @@ async function createValidationResultRecord(params: {
   details?: string[];
   rawProviderOutput?: string | null;
   retryable?: boolean;
+  executionLane?: ExecutionLane | null;
+  editIntent?: EditIntent["kind"] | null;
+  targetValidation?: TargetValidationResult | null;
 }): Promise<ValidationResultRecord> {
   const validation: ValidationResultRecord = {
     id: nanoid(10),
@@ -1445,6 +1455,9 @@ async function createValidationResultRecord(params: {
     details: params.details || [],
     rawProviderOutput: params.rawProviderOutput || null,
     retryable: Boolean(params.retryable),
+    executionLane: params.executionLane || null,
+    editIntent: params.editIntent || null,
+    targetValidation: params.targetValidation || null,
     createdAt: nowIso(),
   };
 
@@ -1453,8 +1466,8 @@ async function createValidationResultRecord(params: {
       `INSERT INTO validation_results (
         id, project_id, revision_id, turn_id, status, build_status, preview_status,
         selector_status, imports_status, design_status, warnings_json, details_json,
-        raw_provider_output, retryable, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        raw_provider_output, retryable, execution_lane, edit_intent, target_validation_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       validation.id,
@@ -1471,10 +1484,74 @@ async function createValidationResultRecord(params: {
       JSON.stringify(validation.details),
       validation.rawProviderOutput,
       validation.retryable ? 1 : 0,
+      validation.executionLane,
+      validation.editIntent,
+      JSON.stringify(validation.targetValidation),
       validation.createdAt,
     );
 
   return validation;
+}
+
+async function createEditTelemetryRecord(params: {
+  projectId: string;
+  revisionId?: string | null;
+  turnId?: string | null;
+  target: SelectionTarget | null;
+  resolvedSourcePath?: string | null;
+  executionLane: ExecutionLane;
+  editIntent: EditIntent["kind"];
+  modelKey: string | null;
+  confidence: number;
+  rollbackTriggered: boolean;
+  outcome: "applied" | "failed";
+  visibleResultMs?: number | null;
+}): Promise<EditTelemetryRecord> {
+  const record: EditTelemetryRecord = {
+    id: nanoid(10),
+    projectId: params.projectId,
+    revisionId: params.revisionId || null,
+    turnId: params.turnId || null,
+    targetLabel: params.target?.label || null,
+    targetFingerprint: params.target?.fingerprint || null,
+    resolvedSourcePath: params.resolvedSourcePath || params.target?.sourceFilePath || null,
+    executionLane: params.executionLane,
+    editIntent: params.editIntent,
+    modelKey: params.modelKey as EditTelemetryRecord["modelKey"],
+    confidence: params.confidence,
+    rollbackTriggered: params.rollbackTriggered,
+    outcome: params.outcome,
+    visibleResultMs: params.visibleResultMs ?? null,
+    createdAt: nowIso(),
+  };
+
+  getDb()
+    .prepare(
+      `INSERT INTO edit_telemetry (
+        id, project_id, revision_id, turn_id, target_label, target_fingerprint,
+        resolved_source_path, execution_lane, edit_intent, model_key, confidence,
+        rollback_triggered, outcome, visible_result_ms, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      record.id,
+      record.projectId,
+      record.revisionId,
+      record.turnId,
+      record.targetLabel,
+      record.targetFingerprint,
+      record.resolvedSourcePath,
+      record.executionLane,
+      record.editIntent,
+      record.modelKey,
+      record.confidence,
+      record.rollbackTriggered ? 1 : 0,
+      record.outcome,
+      record.visibleResultMs,
+      record.createdAt,
+    );
+
+  return record;
 }
 
 async function createConversationTurn(params: {
@@ -2448,6 +2525,218 @@ async function tryApplyDirectTextReplacement(params: {
   return null;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceStyleValueWithKeywords(params: {
+  content: string;
+  keywords: string[];
+  currentValue?: string | null;
+  nextValue: string;
+}): string | null {
+  for (const keyword of params.keywords) {
+    if (params.currentValue) {
+      const currentValuePattern = escapeRegExp(params.currentValue);
+      const patterns = [
+        new RegExp(`(${keyword}\\s*=\\s*["'])${currentValuePattern}(["'])`, "i"),
+        new RegExp(`(${keyword}\\s*=\\s*\\{\\s*["'])${currentValuePattern}(["']\\s*\\})`, "i"),
+        new RegExp(`(${keyword}\\s*:\\s*["'])${currentValuePattern}(["'])`, "i"),
+        new RegExp(`(${keyword}\\s*:\\s*\\{\\s*["'])${currentValuePattern}(["']\\s*\\})`, "i"),
+      ];
+      for (const pattern of patterns) {
+        if (pattern.test(params.content)) {
+          return params.content.replace(pattern, `$1${params.nextValue}$2`);
+        }
+      }
+    }
+
+    const genericPatterns = [
+      new RegExp(`(${keyword}\\s*=\\s*["'])(#[0-9a-f]{3,8}|[a-z]+)(["'])`, "i"),
+      new RegExp(`(${keyword}\\s*=\\s*\\{\\s*["'])(#[0-9a-f]{3,8}|[a-z]+)(["']\\s*\\})`, "i"),
+      new RegExp(`(${keyword}\\s*:\\s*["'])(#[0-9a-f]{3,8}|[a-z]+)(["'])`, "i"),
+      new RegExp(`(${keyword}\\s*:\\s*\\{\\s*["'])(#[0-9a-f]{3,8}|[a-z]+)(["']\\s*\\})`, "i"),
+    ];
+    for (const pattern of genericPatterns) {
+      if (pattern.test(params.content)) {
+        return params.content.replace(pattern, `$1${params.nextValue}$3`);
+      }
+    }
+  }
+
+  return null;
+}
+
+async function tryApplyDeterministicStyleReplacement(params: {
+  projectDir: string;
+  selectionTarget: SelectionTarget | null;
+  intent: EditIntent;
+  allowedFiles: string[];
+}): Promise<
+  | {
+      summary: string;
+      warnings: string[];
+      changedFiles: Array<{ path: string; content: string; reason?: string }>;
+      rawResponse: string | null;
+    }
+  | null
+> {
+  if (!params.selectionTarget || !params.intent.requestedValue) {
+    return null;
+  }
+
+  const currentValue =
+    params.intent.currentValue ||
+    params.selectionTarget.resolvedHandles.find((handle) =>
+      ["line-color", "fill-color", "background-color"].includes(handle.key),
+    )?.currentValue ||
+    null;
+  const keywords =
+    params.intent.kind === "set-line-color"
+      ? ["stroke"]
+      : params.intent.kind === "set-fill-color"
+        ? ["fill"]
+        : ["backgroundColor", "background", "fill"];
+
+  for (const filePath of params.allowedFiles) {
+    const absolutePath = resolveInsideRoot(params.projectDir, filePath);
+    if (!isTextLikeFile(absolutePath)) {
+      continue;
+    }
+
+    const currentContent = await fs.readFile(absolutePath, "utf8");
+    const nextContent = replaceStyleValueWithKeywords({
+      content: currentContent,
+      keywords,
+      currentValue,
+      nextValue: params.intent.requestedValue,
+    });
+
+    if (!nextContent || nextContent === currentContent) {
+      continue;
+    }
+
+    return {
+      summary: `${params.intent.summary} Updated ${keywords[0]} in ${filePath}.`,
+      warnings: [],
+      changedFiles: [
+        {
+          path: filePath,
+          content: nextContent,
+          reason: params.intent.summary,
+        },
+      ],
+      rawResponse: null,
+    };
+  }
+
+  return null;
+}
+
+async function tryApplyDeterministicEdit(params: {
+  projectDir: string;
+  prompt: string;
+  selection: SelectionPayload | null;
+  selectionTarget: SelectionTarget | null;
+  candidateFiles: string[];
+  intent: EditIntent;
+}): Promise<
+  | {
+      summary: string;
+      warnings: string[];
+      changedFiles: Array<{ path: string; content: string; reason?: string }>;
+      rawResponse: string | null;
+    }
+  | null
+> {
+  if (params.intent.kind === "replace-text") {
+    return tryApplyDirectTextReplacement({
+      projectDir: params.projectDir,
+      prompt: params.prompt,
+      selection: params.selection,
+      selectionTarget: params.selectionTarget,
+      candidateFiles: params.candidateFiles,
+    });
+  }
+
+  if (
+    params.intent.kind === "set-line-color" ||
+    params.intent.kind === "set-fill-color" ||
+    params.intent.kind === "set-background-color"
+  ) {
+    return tryApplyDeterministicStyleReplacement({
+      projectDir: params.projectDir,
+      selectionTarget: params.selectionTarget,
+      intent: params.intent,
+      allowedFiles: params.candidateFiles,
+    });
+  }
+
+  return null;
+}
+
+function validateTargetPersistence(params: {
+  changedFiles: Array<{ path: string; content: string; reason?: string }>;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
+}): TargetValidationResult {
+  const changedPaths = params.changedFiles.map((file) => toPosixPath(file.path));
+  const sourceMappingValid = changedPaths.every((filePath) =>
+    params.editPlan.allowedFiles.includes(filePath),
+  );
+  const preservedNearbyElements =
+    params.editPlan.lane !== "deterministic" || changedPaths.length <= Math.max(1, params.editPlan.allowedFiles.length);
+
+  let changedIntendedTarget = !params.selectionTarget;
+
+  if (params.selectionTarget) {
+    if (params.editPlan.intent.kind === "replace-text") {
+      changedIntendedTarget = changedPaths.some(
+        (filePath) =>
+          filePath === params.selectionTarget?.sourceFilePath ||
+          params.selectionTarget?.sourceCandidates.some((candidate) => candidate.path === filePath),
+      );
+    } else if (
+      params.editPlan.intent.kind === "set-line-color" ||
+      params.editPlan.intent.kind === "set-fill-color" ||
+      params.editPlan.intent.kind === "set-background-color"
+    ) {
+      const nextValue = params.editPlan.intent.requestedValue || "";
+      const relevantKeyword =
+        params.editPlan.intent.kind === "set-line-color"
+          ? /stroke/i
+          : params.editPlan.intent.kind === "set-fill-color"
+            ? /fill/i
+            : /background|fill/i;
+      changedIntendedTarget = params.changedFiles.some(
+        (file) => file.content.includes(nextValue) && relevantKeyword.test(file.content),
+      );
+    } else if (params.editPlan.intent.kind === "set-visibility") {
+      changedIntendedTarget = changedPaths.some((filePath) => filePath === OVERRIDES_CONFIG_PATH);
+    } else {
+      changedIntendedTarget = changedPaths.length > 0;
+    }
+  }
+
+  return {
+    changedIntendedTarget,
+    preservedNearbyElements,
+    sourceMappingValid,
+    runtimeHealthy: true,
+    details: [
+      changedIntendedTarget
+        ? "The requested target change was persisted in the planned file scope."
+        : "MyMake could not prove that the intended target changed.",
+      sourceMappingValid
+        ? "Changed files stayed within the resolved target scope."
+        : "The edit touched files outside the resolved target scope.",
+      preservedNearbyElements
+        ? "Nearby scope remained constrained."
+        : "The edit widened beyond the expected nearby scope.",
+    ],
+  };
+}
+
 async function runEditValidation(params: {
   projectId: string;
   projectDir: string;
@@ -2456,6 +2745,7 @@ async function runEditValidation(params: {
   editMode: EditMode;
   selection: SelectionPayload | null;
   selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
   rawProviderOutput: string | null;
 }): Promise<Omit<ValidationResultRecord, "id" | "createdAt">> {
   await validateChangedFileImports(params.projectDir, params.changedFiles);
@@ -2483,15 +2773,24 @@ async function runEditValidation(params: {
     brandKit: knowledge.brandKit,
   });
 
-  const selectorStatus =
-    params.selectionTarget && params.changedFiles.length
-      ? ("passed" as const)
-      : ("skipped" as const);
+  const targetValidation = validateTargetPersistence({
+    changedFiles: params.changedFiles,
+    selectionTarget: params.selectionTarget,
+    editPlan: params.editPlan,
+  });
+  if (!targetValidation.changedIntendedTarget || !targetValidation.sourceMappingValid) {
+    throw new Error(targetValidation.details.join(" "));
+  }
+
+  const selectorStatus = params.selectionTarget
+    ? (targetValidation.changedIntendedTarget ? "passed" : "failed")
+    : ("skipped" as const);
 
   const warnings = [...designValidation.warnings];
   const details = [
     "Import resolution passed.",
     "Preview runner booted successfully after the edit.",
+    ...targetValidation.details,
     ...designValidation.details,
   ];
 
@@ -2509,6 +2808,9 @@ async function runEditValidation(params: {
     details,
     rawProviderOutput: params.rawProviderOutput,
     retryable: false,
+    executionLane: params.editPlan.lane,
+    editIntent: params.editPlan.intent.kind,
+    targetValidation,
   };
 }
 
@@ -2521,6 +2823,7 @@ export async function applyAiEdit(
   workspace: ProjectWorkspace;
 }> {
   const userId = await requireCurrentUserId();
+  const editStartedAt = Date.now();
   const project = getProjectRow(payload.projectId, userId);
   const runtime = requireRuntime(await detectProjectRuntime(project.extractedPath));
   await syncProjectKnowledgeAndKits(project, runtime);
@@ -2618,8 +2921,14 @@ export async function applyAiEdit(
     selectionTarget,
     contextGraph,
     hasStaticEditableSupport: hasStaticEditableOverrides(projectFiles),
+    inspectorAction: payload.inspectorAction,
   });
   const editMode: EditMode = editPlan.mode;
+  if (editPlan.requiresConfirmation && !payload.inspectorAction) {
+    throw new Error(
+      "MyMake is not confident enough about the selected target yet. Click the exact layer again or use the inspector controls for a precise edit.",
+    );
+  }
   const activeKitSummaries = describeKitAssets(kits);
   const managedAiContext = await buildManagedAiContext({
     projectDir: project.extractedPath,
@@ -2733,12 +3042,13 @@ Fix the root cause before applying the edit. You may update related files, style
     for (const strategy of attemptStrategyQueue) {
       try {
         if (strategy === "direct-property") {
-          const directResult = await tryApplyDirectTextReplacement({
+          const directResult = await tryApplyDeterministicEdit({
             projectDir: project.extractedPath,
             prompt: payload.prompt,
             selection: payload.selection,
             selectionTarget,
-            candidateFiles: editPlan.candidateFiles,
+            candidateFiles: editPlan.allowedFiles,
+            intent: editPlan.intent,
           });
           if (!directResult) {
             throw new Error("Direct property mode could not safely resolve this change.");
@@ -2867,6 +3177,7 @@ Fix the root cause before applying the edit. You may update related files, style
         editMode,
         selection: payload.selection,
         selectionTarget,
+        editPlan,
         rawProviderOutput: attemptResult.rawResponse,
       });
       aiResult = attemptResult;
@@ -2923,8 +3234,23 @@ Fix the root cause before applying the edit. You may update related files, style
           ],
       rawProviderOutput: lastRawResponse,
       retryable: true,
+      executionLane: editPlan.lane,
+      editIntent: editPlan.intent.kind,
+      targetValidation: {
+        changedIntendedTarget: false,
+        preservedNearbyElements: false,
+        sourceMappingValid: false,
+        runtimeHealthy: false,
+        details: attemptFailures.length
+          ? attemptFailures
+          : [
+              lastAttemptError instanceof Error
+                ? lastAttemptError.message
+                : "The edit planner could not produce a safe change set.",
+            ],
+      },
     });
-    await createConversationTurn({
+    const failedTurn = await createConversationTurn({
       projectId: payload.projectId,
       revisionId: currentRevision.id,
       kind: "assistant",
@@ -2940,6 +3266,20 @@ Fix the root cause before applying the edit. You may update related files, style
       contextSnapshotId: contextSnapshot.id,
       validationResultId: validationResult.id,
       warnings: [...validationResult.warnings, ...attachmentWarnings],
+    });
+    await createEditTelemetryRecord({
+      projectId: payload.projectId,
+      revisionId: currentRevision.id,
+      turnId: failedTurn.id,
+      target: selectionTarget,
+      resolvedSourcePath: selectionTarget?.sourceFilePath || null,
+      executionLane: editPlan.lane,
+      editIntent: editPlan.intent.kind,
+      modelKey: payload.aiModelKey || DEFAULT_AI_MODEL_KEY,
+      confidence: editPlan.confidence,
+      rollbackTriggered: false,
+      outcome: "failed",
+      visibleResultMs: Date.now() - editStartedAt,
     });
     getDb()
       .prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`)
@@ -2988,6 +3328,20 @@ Fix the root cause before applying the edit. You may update related files, style
         WHERE id = ?`,
     )
     .run(assistantTurn.id, validationResult.id);
+  await createEditTelemetryRecord({
+    projectId: payload.projectId,
+    revisionId: revision.id,
+    turnId: assistantTurn.id,
+    target: selectionTarget,
+    resolvedSourcePath: changedPaths[0] || selectionTarget?.sourceFilePath || null,
+    executionLane: editPlan.lane,
+    editIntent: editPlan.intent.kind,
+    modelKey: payload.aiModelKey || DEFAULT_AI_MODEL_KEY,
+    confidence: editPlan.confidence,
+    rollbackTriggered: successfulAttemptCount > 1,
+    outcome: "applied",
+    visibleResultMs: Date.now() - editStartedAt,
+  });
   getDb()
     .prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`)
     .run("applied", userTurn.id);
@@ -3085,6 +3439,24 @@ export async function applyCodexBridgeWorkspace(params: {
     selectionTarget,
     runtime,
   });
+  const bridgeEditPlan = buildEditPlan({
+    currentFilePath: null,
+    currentFileContent: null,
+    editMode,
+    prompt: params.prompt,
+    runtime,
+    selectionTarget,
+    contextGraph: {
+      selectionTarget,
+      contextFiles: [],
+      sources: [],
+      tokenBudget: 0,
+      compressedMemory: null,
+      primaryTarget: selectionTarget?.label || params.selection?.route || "/",
+      candidateFiles: (params.changedFiles || []).map((item) => toPosixPath(item.path)),
+    },
+    hasStaticEditableSupport: hasStaticEditableOverrides(await listProjectFiles(project.extractedPath)),
+  });
   const provider = "openai" as const;
 
   const userTurn = await createConversationTurn({
@@ -3137,6 +3509,7 @@ export async function applyCodexBridgeWorkspace(params: {
       editMode,
       selection: params.selection,
       selectionTarget,
+      editPlan: bridgeEditPlan,
       rawProviderOutput: params.threadId
         ? JSON.stringify({ bridge: "codex-local", threadId: params.threadId })
         : "codex-local",
@@ -3185,6 +3558,19 @@ export async function applyCodexBridgeWorkspace(params: {
           WHERE id = ?`,
       )
       .run(assistantTurn.id, validationResult.id);
+    await createEditTelemetryRecord({
+      projectId: params.projectId,
+      revisionId: revision.id,
+      turnId: assistantTurn.id,
+      target: selectionTarget,
+      resolvedSourcePath: concreteChangedFiles[0]?.path || selectionTarget?.sourceFilePath || null,
+      executionLane: bridgeEditPlan.lane,
+      editIntent: bridgeEditPlan.intent.kind,
+      modelKey: "openai-codex",
+      confidence: bridgeEditPlan.confidence,
+      rollbackTriggered: false,
+      outcome: "applied",
+    });
     getDb().prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`).run("applied", userTurn.id);
 
     await updateEditMemory({
@@ -3243,9 +3629,21 @@ export async function applyCodexBridgeWorkspace(params: {
         ? JSON.stringify({ bridge: "codex-local", threadId: params.threadId })
         : "codex-local",
       retryable: true,
+      executionLane: bridgeEditPlan.lane,
+      editIntent: bridgeEditPlan.intent.kind,
+      targetValidation: {
+        changedIntendedTarget: false,
+        preservedNearbyElements: false,
+        sourceMappingValid: false,
+        runtimeHealthy: false,
+        details: [
+          error instanceof Error ? error.message : "Codex bridge changes failed validation.",
+          "MyMake restored the last working checkpoint automatically.",
+        ],
+      },
     });
 
-    await createConversationTurn({
+    const failedTurn = await createConversationTurn({
       projectId: params.projectId,
       revisionId: currentRevision.id,
       kind: "assistant",
@@ -3260,6 +3658,19 @@ export async function applyCodexBridgeWorkspace(params: {
       selectionTarget,
       warnings: validationResult.warnings,
       validationResultId: validationResult.id,
+    });
+    await createEditTelemetryRecord({
+      projectId: params.projectId,
+      revisionId: currentRevision.id,
+      turnId: failedTurn.id,
+      target: selectionTarget,
+      resolvedSourcePath: selectionTarget?.sourceFilePath || null,
+      executionLane: bridgeEditPlan.lane,
+      editIntent: bridgeEditPlan.intent.kind,
+      modelKey: "openai-codex",
+      confidence: bridgeEditPlan.confidence,
+      rollbackTriggered: true,
+      outcome: "failed",
     });
     getDb().prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`).run("failed", userTurn.id);
 

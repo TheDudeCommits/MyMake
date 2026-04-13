@@ -167,6 +167,121 @@ export function buildPreviewBridgeScript(projectId: string): string {
         return null;
       }
 
+      function getComputedStyleSafe(element) {
+        try {
+          return window.getComputedStyle(element);
+        } catch {
+          return null;
+        }
+      }
+
+      function getNearbyTextContext(element) {
+        const values = [];
+        const addValue = (value) => {
+          const normalized = String(value || "").replace(/\\s+/g, " ").trim();
+          if (!normalized || normalized.length < 2 || normalized.length > 120) {
+            return;
+          }
+          if (!values.includes(normalized)) {
+            values.push(normalized);
+          }
+        };
+
+        addValue(element.textContent || "");
+
+        let current = element.parentElement;
+        let depth = 0;
+        while (current && current !== document.body && depth < 3) {
+          addValue(current.getAttribute("data-framer-name"));
+          addValue(current.textContent || "");
+          current = current.parentElement;
+          depth += 1;
+        }
+
+        const parent = element.parentElement;
+        if (parent) {
+          Array.from(parent.children)
+            .filter((child) => child !== element)
+            .slice(0, 4)
+            .forEach((child) => {
+              addValue(child.getAttribute("data-framer-name"));
+              addValue(child.textContent || "");
+            });
+        }
+
+        return values.slice(0, 8);
+      }
+
+      function detectVisualType(element) {
+        const tagName = element.tagName.toLowerCase();
+        const parentTag = element.parentElement ? element.parentElement.tagName.toLowerCase() : "";
+        if (tagName === "img") {
+          return "image";
+        }
+        if (tagName === "svg") {
+          return "vector";
+        }
+        if (tagName === "path" || tagName === "line" || tagName === "polyline") {
+          if (parentTag === "svg" || element.closest("svg")) {
+            const hasStroke = element.getAttribute("stroke");
+            const hasFill = element.getAttribute("fill");
+            if (hasStroke && (!hasFill || hasFill === "none")) {
+              return "chart-line";
+            }
+            if (hasFill && hasFill !== "none") {
+              return "chart-area";
+            }
+            return "vector-path";
+          }
+        }
+        if (/button|a/.test(tagName) || element.getAttribute("role") === "button") {
+          return "interactive";
+        }
+        if (/h1|h2|h3|h4|h5|h6|p|span|strong|em|label/.test(tagName)) {
+          return "text";
+        }
+        return "container";
+      }
+
+      function buildFingerprint(element, scopeSelector, scopedSelector) {
+        const parts = [
+          element.tagName.toLowerCase(),
+          element.getAttribute("data-framer-appear-id") || "",
+          element.getAttribute("data-framer-name") || "",
+          element.getAttribute("role") || "",
+          (element.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 80),
+          scopeSelector || "",
+          scopedSelector || "",
+        ];
+        return parts.filter(Boolean).join("::");
+      }
+
+      function inferEditableProperties(element) {
+        const style = getComputedStyleSafe(element);
+        const strokeValue =
+          element.getAttribute("stroke") ||
+          element.getAttribute("data-stroke") ||
+          style?.stroke ||
+          "";
+        const fillValue =
+          element.getAttribute("fill") ||
+          style?.fill ||
+          style?.backgroundColor ||
+          "";
+        const values = [
+          ((element.textContent || "").trim() ? "text" : null),
+          ((element instanceof HTMLAnchorElement || element.hasAttribute("href")) ? "link" : null),
+          ((element instanceof HTMLImageElement || element.hasAttribute("src")) ? "image" : null),
+          (strokeValue && strokeValue !== "none" ? "line-color" : null),
+          (fillValue && fillValue !== "none" && fillValue !== "rgba(0, 0, 0, 0)" ? "fill-color" : null),
+          (["button", "a"].includes(element.tagName.toLowerCase()) ? "spacing" : null),
+          (style?.borderRadius && style.borderRadius !== "0px" ? "radius" : null),
+          "visibility",
+          "layout",
+        ].filter(Boolean);
+        return Array.from(new Set(values));
+      }
+
       function ensureOverlay() {
         let overlay = document.getElementById(OVERLAY_ID);
         if (!overlay) {
@@ -228,6 +343,8 @@ export function buildPreviewBridgeScript(projectId: string): string {
           framerRoot && framerRoot !== element
             ? buildSelector(element, framerRoot)
             : null;
+        const contextTexts = getNearbyTextContext(element);
+        const visualType = detectVisualType(element);
         return {
           route: getPreviewRoute(),
           url: window.location.href,
@@ -248,14 +365,14 @@ export function buildPreviewBridgeScript(projectId: string): string {
             element instanceof HTMLImageElement
               ? element.currentSrc || element.src
               : element.getAttribute("src"),
-          editableProperties: [
-            ((element.textContent || "").trim() ? "text" : null),
-            ((element instanceof HTMLAnchorElement || element.hasAttribute("href")) ? "link" : null),
-            ((element instanceof HTMLImageElement || element.hasAttribute("src")) ? "image" : null),
-            (["button", "a"].includes(element.tagName.toLowerCase()) ? "spacing" : null),
-            "visibility",
-            "layout",
-          ].filter(Boolean),
+          editableProperties: inferEditableProperties(element),
+          fingerprint: buildFingerprint(element, scopeSelector, scopedSelector),
+          instanceScope:
+            element.getAttribute("data-framer-appear-id") ||
+            framerRoot?.getAttribute("data-framer-appear-id") ||
+            scopeSelector,
+          contextTexts,
+          visualType,
           boundingBox: toBox(rect),
         };
       }

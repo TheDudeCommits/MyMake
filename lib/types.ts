@@ -29,6 +29,18 @@ export type ConversationTurnKind = "user" | "assistant" | "system";
 export type ConversationTurnStatus = "pending" | "applied" | "failed" | "info";
 export type EditStrategy = "direct-property" | "static-override" | "patch" | "rewrite";
 export type EditRisk = "low" | "medium" | "high";
+export type ExecutionLane = "deterministic" | "scoped-ai" | "deep-fix";
+export type EditIntentKind =
+  | "replace-text"
+  | "set-line-color"
+  | "set-fill-color"
+  | "set-background-color"
+  | "set-spacing"
+  | "set-radius"
+  | "set-size"
+  | "set-visibility"
+  | "swap-image"
+  | "unknown";
 
 export interface ProjectRecord {
   id: string;
@@ -92,6 +104,10 @@ export interface SelectionPayload {
   href: string | null;
   src: string | null;
   editableProperties: string[];
+  fingerprint?: string;
+  instanceScope?: string | null;
+  contextTexts?: string[];
+  visualType?: string | null;
 }
 
 export interface FileNode {
@@ -164,14 +180,35 @@ export interface EditableCapability {
   confidence: number;
 }
 
+export interface SelectionSourceCandidate {
+  path: string;
+  score: number;
+  reason: string;
+  matchedTerms: string[];
+}
+
+export interface ResolvedHandle {
+  key: string;
+  label: string;
+  confidence: number;
+  currentValue?: string | null;
+}
+
 export interface SelectionTarget {
+  targetId: string;
+  fingerprint: string;
   route: string;
   label: string;
   summary: string;
   sourceFilePath: string | null;
+  sourceCandidates: SelectionSourceCandidate[];
+  confidence: number;
   componentName: string | null;
   sectionName: string | null;
   repeatGroup: string | null;
+  instanceScope: string | null;
+  visualType: string | null;
+  resolvedHandles: ResolvedHandle[];
   editableCapabilities: EditableCapability[];
   payload: SelectionPayload;
 }
@@ -230,6 +267,9 @@ export interface ValidationResultRecord {
   details: string[];
   rawProviderOutput: string | null;
   retryable: boolean;
+  executionLane?: ExecutionLane | null;
+  editIntent?: EditIntentKind | null;
+  targetValidation?: TargetValidationResult | null;
   createdAt: string;
 }
 
@@ -258,8 +298,14 @@ export interface EditPlan {
   mode: EditMode;
   target: SelectionTarget | null;
   strategy: EditStrategy;
+  lane: ExecutionLane;
+  intent: EditIntent;
   risk: EditRisk;
   candidateFiles: string[];
+  allowedFiles: string[];
+  allowedProperties: string[];
+  confidence: number;
+  requiresConfirmation: boolean;
   validationSet: string[];
   rationale: string[];
 }
@@ -298,6 +344,7 @@ export interface AiEditRequestPayload {
   editMode?: EditMode | null;
   aiModelKey?: AiModelKey | null;
   currentFilePath?: string | null;
+  inspectorAction?: InspectorAction | null;
 }
 
 export interface AiChangedFile {
@@ -316,6 +363,66 @@ export interface AiEditResponsePayload {
   changedFiles: AiChangedFile[];
   newRevisionId: string;
   warnings: string[];
+}
+
+export interface EditIntent {
+  kind: EditIntentKind;
+  confidence: number;
+  requestedValue?: string | null;
+  currentValue?: string | null;
+  summary: string;
+}
+
+export interface ResolvedEditAction {
+  target: SelectionTarget | null;
+  intent: EditIntent;
+  lane: ExecutionLane;
+  strategy: EditStrategy;
+  allowedFiles: string[];
+  allowedProperties: string[];
+  confidence: number;
+  rationale: string[];
+}
+
+export interface TargetValidationResult {
+  changedIntendedTarget: boolean;
+  preservedNearbyElements: boolean;
+  sourceMappingValid: boolean;
+  runtimeHealthy: boolean;
+  details: string[];
+}
+
+export interface EditTelemetryRecord {
+  id: string;
+  projectId: string;
+  revisionId: string | null;
+  turnId: string | null;
+  targetLabel: string | null;
+  targetFingerprint: string | null;
+  resolvedSourcePath: string | null;
+  executionLane: ExecutionLane;
+  editIntent: EditIntentKind;
+  modelKey: AiModelKey | null;
+  confidence: number;
+  rollbackTriggered: boolean;
+  outcome: "applied" | "failed";
+  visibleResultMs: number | null;
+  createdAt: string;
+}
+
+export interface InspectorAction {
+  kind:
+    | "replace-text"
+    | "set-line-color"
+    | "set-fill-color"
+    | "set-background-color"
+    | "set-spacing"
+    | "set-radius"
+    | "set-size"
+    | "set-visibility"
+    | "swap-image";
+  value?: string | null;
+  axis?: "all" | "x" | "y" | null;
 }
 
 export interface AnthropicAttachment {

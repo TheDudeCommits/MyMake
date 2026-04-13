@@ -123,6 +123,28 @@ const SCHEMA_SQL = `
     details_json TEXT NOT NULL,
     raw_provider_output TEXT,
     retryable INTEGER NOT NULL,
+    execution_lane TEXT,
+    edit_intent TEXT,
+    target_validation_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS edit_telemetry (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    revision_id TEXT,
+    turn_id TEXT,
+    target_label TEXT,
+    target_fingerprint TEXT,
+    resolved_source_path TEXT,
+    execution_lane TEXT NOT NULL,
+    edit_intent TEXT NOT NULL,
+    model_key TEXT,
+    confidence REAL NOT NULL,
+    rollback_triggered INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    visible_result_ms INTEGER,
     created_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
   );
@@ -183,6 +205,9 @@ const INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS idx_validation_results_project_created_at
     ON validation_results(project_id, created_at DESC);
 
+  CREATE INDEX IF NOT EXISTS idx_edit_telemetry_project_created_at
+    ON edit_telemetry(project_id, created_at DESC);
+
   CREATE INDEX IF NOT EXISTS idx_github_connections_owner_updated_at
     ON github_connections(owner_user_id, updated_at DESC);
 
@@ -212,6 +237,9 @@ function runMigrations(db: Database.Database): void {
   ensureColumn(db, "projects", "created_at", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "projects", "owner_user_id", "TEXT");
   ensureColumn(db, "github_connections", "owner_user_id", "TEXT");
+  ensureColumn(db, "validation_results", "execution_lane", "TEXT");
+  ensureColumn(db, "validation_results", "edit_intent", "TEXT");
+  ensureColumn(db, "validation_results", "target_validation_json", "TEXT");
 }
 
 export function getDb(): Database.Database {

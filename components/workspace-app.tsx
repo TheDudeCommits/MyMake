@@ -266,12 +266,43 @@ function selectedElementSummary(selection: SelectionPayload | null): string {
   }
 
   return (
+    selection.contextTexts?.join(" / ") ||
     selection.textContent ||
     selection.nearestFramerName ||
     selection.scopedSelector ||
     selection.selector ||
     selection.domPath
   );
+}
+
+function normalizeColorForInput(value: string | null | undefined): string {
+  if (!value) {
+    return "#ffffff";
+  }
+
+  const normalized = value.trim();
+  if (/^#[0-9a-f]{3}$/i.test(normalized)) {
+    return `#${normalized[1]}${normalized[1]}${normalized[2]}${normalized[2]}${normalized[3]}${normalized[3]}`.toLowerCase();
+  }
+  if (/^#[0-9a-f]{6}$/i.test(normalized)) {
+    return normalized.toLowerCase();
+  }
+  return "#ffffff";
+}
+
+function inferPlannedLane(selection: SelectionPayload | null, prompt: string): string {
+  const normalized = prompt.toLowerCase();
+  if (
+    selection &&
+    (/change|replace|rename|remove|delete|hide/.test(normalized) ||
+      /line|stroke|fill|background|radius|spacing/.test(normalized))
+  ) {
+    return "Deterministic";
+  }
+  if (selection) {
+    return "Scoped AI";
+  }
+  return "Deep Fix";
 }
 
 function turnStatusLabel(turn: ConversationTurnRecord): string {
@@ -1250,6 +1281,9 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     initialSnapshot.defaultAiModelKey,
   );
   const [selectedElement, setSelectedElement] = useState<SelectionPayload | null>(null);
+  const [inspectorTextValue, setInspectorTextValue] = useState("");
+  const [inspectorLineColor, setInspectorLineColor] = useState("#ffffff");
+  const [inspectorFillColor, setInspectorFillColor] = useState("#ffffff");
   const [currentRoute, setCurrentRoute] = useState("/");
   const [prompt, setPrompt] = useState("");
   const [editorFilePath, setEditorFilePath] = useState<string | null>(
@@ -1323,6 +1357,22 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const currentDevice = DEVICE_PRESETS[devicePreset];
   const isDesktopPreview = devicePreset === "desktop";
   const displayRoute = routeLabel(currentRoute);
+  const plannedLaneLabel = useMemo(
+    () => inferPlannedLane(selectedElement, prompt),
+    [selectedElement, prompt],
+  );
+
+  useEffect(() => {
+    setInspectorTextValue(selectedElement?.textContent || "");
+    setInspectorLineColor(normalizeColorForInput(selectedElement?.attributes?.stroke));
+    setInspectorFillColor(
+      normalizeColorForInput(
+        selectedElement?.attributes?.fill && selectedElement.attributes.fill !== "none"
+          ? selectedElement.attributes.fill
+          : selectedElement?.attributes?.["background-color"],
+      ),
+    );
+  }, [selectedElement]);
   const hasUnsavedEdits = Boolean(editorFilePath && editorContent !== editorBaselineContent);
   const previewIdentity = currentProject
     ? `${currentProject.project.id}:${currentProject.preview.instanceId ?? "cold"}`
@@ -2229,7 +2279,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       return;
     }
 
-    if (selectedAiModel?.key === "openai-codex") {
+    if (selectedAiModel?.key === "openai-codex" && plannedLaneLabel !== "Deterministic") {
       setIsRunningAi(true);
       setError(null);
       clearComposerDiagnostics();
@@ -2275,6 +2325,58 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       setPrompt("");
     } catch (caughtError) {
       recordComposerError(caughtError, "AI edit failed.");
+    } finally {
+      setIsRunningAi(false);
+    }
+  }
+
+  async function handleInspectorAction(action: {
+    kind:
+      | "replace-text"
+      | "set-line-color"
+      | "set-fill-color"
+      | "set-background-color"
+      | "set-spacing"
+      | "set-radius"
+      | "set-size"
+      | "set-visibility"
+      | "swap-image";
+    value?: string | null;
+    promptOverride: string;
+  }) {
+    if (!currentProject?.project.currentRevisionId || !selectedElement) {
+      return;
+    }
+
+    setIsRunningAi(true);
+    setError(null);
+    clearComposerDiagnostics();
+    setFeedback(`Applying a precise inspector edit to ${selectedElementTitle(selectedElement)}...`);
+
+    try {
+      const response = await fetch(`/api/projects/${currentProject.project.id}/ai-edit`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          projectId: currentProject.project.id,
+          revisionId: currentProject.project.currentRevisionId,
+          prompt: action.promptOverride,
+          selection: selectedElement,
+          attachmentIds: selectedAttachmentIds,
+          aiModelKey: selectedAiModel?.key || fallbackAiModelKey,
+          currentFilePath: editorFilePath,
+          inspectorAction: {
+            kind: action.kind,
+            value: action.value || null,
+          },
+        }),
+      });
+      const data = await readJsonResponse<SnapshotResponse>(response);
+      applySnapshot(data);
+    } catch (caughtError) {
+      recordComposerError(caughtError, "Inspector edit failed.");
     } finally {
       setIsRunningAi(false);
     }
@@ -2912,6 +3014,20 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
                     {selectedElementSummary(selectedElement)}
                   </p>
+                  {selectedElement ? (
+                    <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                      <div className="rounded-[10px] border border-white/[0.08] bg-[#262628] px-2.5 py-2">
+                        <span className="block text-[9px] text-slate-500">Planned lane</span>
+                        <span className="mt-1 block text-slate-200">{plannedLaneLabel}</span>
+                      </div>
+                      <div className="rounded-[10px] border border-white/[0.08] bg-[#262628] px-2.5 py-2">
+                        <span className="block text-[9px] text-slate-500">Instance scope</span>
+                        <span className="mt-1 block truncate text-slate-200">
+                          {selectedElement.instanceScope || selectedElement.scopeSelector || "Exact layer"}
+                        </span>
+                      </div>
+                    </div>
+                  ) : null}
                   {selectedElement?.editableProperties?.length ? (
                     <div className="mt-3 flex flex-wrap gap-2">
                       {selectedElement.editableProperties.slice(0, 5).map((item) => (
@@ -2922,6 +3038,123 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                           {item}
                         </span>
                       ))}
+                    </div>
+                  ) : null}
+                  {selectedElement ? (
+                    <div className="mt-3 space-y-2 rounded-[12px] border border-white/[0.08] bg-[#262628] px-3 py-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Inspector</p>
+                        <span className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                          Deterministic first
+                        </span>
+                      </div>
+
+                      {selectedElement.textContent ? (
+                        <div className="space-y-2">
+                          <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                            Text
+                          </label>
+                          <input
+                            className="h-9 w-full rounded-[10px] border border-white/[0.08] bg-[#1f2023] px-3 text-sm text-white outline-none placeholder:text-slate-500"
+                            value={inspectorTextValue}
+                            onChange={(event) => setInspectorTextValue(event.target.value)}
+                          />
+                          <button
+                            className="w-full rounded-[10px] border border-white/[0.08] bg-[#31323a] px-3 py-2 text-xs font-medium text-white transition hover:bg-[#3a3c46]"
+                            type="button"
+                            disabled={!inspectorTextValue.trim() || isRunningAi}
+                            onClick={() =>
+                              void handleInspectorAction({
+                                kind: "replace-text",
+                                value: inspectorTextValue,
+                                promptOverride: `Change this selected text to "${inspectorTextValue}".`,
+                              })
+                            }
+                          >
+                            Apply text change
+                          </button>
+                        </div>
+                      ) : null}
+
+                      {selectedElement.editableProperties.includes("line-color") ? (
+                        <div className="space-y-2">
+                          <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                            Line color
+                          </label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              className="h-9 w-10 rounded-[10px] border border-white/[0.08] bg-transparent"
+                              type="color"
+                              value={inspectorLineColor}
+                              onChange={(event) => setInspectorLineColor(event.target.value)}
+                            />
+                            <button
+                              className="flex-1 rounded-[10px] border border-white/[0.08] bg-[#31323a] px-3 py-2 text-xs font-medium text-white transition hover:bg-[#3a3c46]"
+                              type="button"
+                              disabled={isRunningAi}
+                              onClick={() =>
+                                void handleInspectorAction({
+                                  kind: "set-line-color",
+                                  value: inspectorLineColor,
+                                  promptOverride: `Change only the selected line or stroke color to ${inspectorLineColor}. Do not change any fill or shaded area.`,
+                                })
+                              }
+                            >
+                              Apply line color
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {selectedElement.editableProperties.includes("fill-color") ? (
+                        <div className="space-y-2">
+                          <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                            Fill or background
+                          </label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              className="h-9 w-10 rounded-[10px] border border-white/[0.08] bg-transparent"
+                              type="color"
+                              value={inspectorFillColor}
+                              onChange={(event) => setInspectorFillColor(event.target.value)}
+                            />
+                            <button
+                              className="flex-1 rounded-[10px] border border-white/[0.08] bg-[#31323a] px-3 py-2 text-xs font-medium text-white transition hover:bg-[#3a3c46]"
+                              type="button"
+                              disabled={isRunningAi}
+                              onClick={() =>
+                                void handleInspectorAction({
+                                  kind:
+                                    selectedElement.visualType === "chart-area"
+                                      ? "set-fill-color"
+                                      : "set-background-color",
+                                  value: inspectorFillColor,
+                                  promptOverride:
+                                    selectedElement.visualType === "chart-area"
+                                      ? `Change only the selected filled area color to ${inspectorFillColor}.`
+                                      : `Change the selected background or fill color to ${inspectorFillColor}.`,
+                                })
+                              }
+                            >
+                              Apply fill
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      <button
+                        className="w-full rounded-[10px] border border-white/[0.08] bg-[#2f2327] px-3 py-2 text-xs font-medium text-rose-100 transition hover:bg-[#3a2a30]"
+                        type="button"
+                        disabled={isRunningAi}
+                        onClick={() =>
+                          void handleInspectorAction({
+                            kind: "set-visibility",
+                            promptOverride: "Hide the selected element.",
+                          })
+                        }
+                      >
+                        Hide selected element
+                      </button>
                     </div>
                   ) : null}
                 </div>
