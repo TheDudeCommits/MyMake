@@ -7,6 +7,7 @@ import {
   GITHUB_REDIRECT_COOKIE_NAME,
   GITHUB_STATE_COOKIE_NAME,
   GITHUB_USER_COOKIE_NAME,
+  getPublicAppBaseUrl,
   upsertGitHubConnection,
 } from "@/lib/server/github";
 
@@ -14,6 +15,7 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
+  const publicAppBaseUrl = getPublicAppBaseUrl(requestUrl.origin);
   const code = requestUrl.searchParams.get("code");
   const state = requestUrl.searchParams.get("state");
   const expectedState = cookies().get(GITHUB_STATE_COOKIE_NAME)?.value;
@@ -25,7 +27,7 @@ export async function GET(request: Request) {
   cookies().delete(GITHUB_USER_COOKIE_NAME);
 
   if (!code || !state || !expectedState || state !== expectedState || !userId) {
-    const failedUrl = new URL(redirectPath, requestUrl.origin);
+    const failedUrl = new URL(redirectPath, publicAppBaseUrl);
     failedUrl.searchParams.set("github", "failed");
     return NextResponse.redirect(failedUrl);
   }
@@ -38,11 +40,11 @@ export async function GET(request: Request) {
     });
     await upsertGitHubConnection(userId, token);
 
-    const successUrl = new URL(redirectPath, requestUrl.origin);
+    const successUrl = new URL(redirectPath, publicAppBaseUrl);
     successUrl.searchParams.set("github", "connected");
     return NextResponse.redirect(successUrl);
   } catch {
-    const failedUrl = new URL(redirectPath, requestUrl.origin);
+    const failedUrl = new URL(redirectPath, publicAppBaseUrl);
     failedUrl.searchParams.set("github", "failed");
     return NextResponse.redirect(failedUrl);
   }
