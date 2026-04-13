@@ -42,6 +42,16 @@ function getProjectIdFromPath(pathname = ""): string | null {
   return parts[1];
 }
 
+function getProjectIdFromParams(
+  params: Record<string, string | string[] | undefined> | undefined,
+): string | null {
+  if (!params?.projectId) {
+    return null;
+  }
+
+  return Array.isArray(params.projectId) ? params.projectId[0] || null : params.projectId;
+}
+
 function isPublicPreviewPath(pathname = ""): boolean {
   return pathname.split("/").filter(Boolean)[0] === "public-preview";
 }
@@ -94,12 +104,14 @@ function resolvePreviewProjectId(request: {
   mymakeProjectId?: string;
   url?: string;
   path?: string;
+  params?: Record<string, string | string[] | undefined>;
   headers: {
     referer?: string | string[];
   };
 }): string | null {
   return (
     request.mymakeProjectId ||
+    getProjectIdFromParams(request.params) ||
     getProjectIdFromPath(request.path || request.url || "") ||
     getProjectIdFromReferer(request.headers.referer) ||
     (isPreviewWebSocketPath(request.url || "") ? getActivePreviewProjectId() : null)
@@ -294,6 +306,7 @@ async function previewAuthGuard(req: Request, res: Response, nextFn: NextFunctio
     return;
   }
 
+  req.mymakeProjectId = projectId;
   nextFn();
 }
 
