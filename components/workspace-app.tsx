@@ -63,6 +63,7 @@ const DEVICE_PRESETS: Record<
 const DEVICE_ORDER: DevicePreset[] = ["desktop", "tablet", "mobile"];
 const AI_MODEL_STORAGE_KEY = "mymake-selected-ai-model";
 const CODEX_BRIDGE_ORIGIN = "http://127.0.0.1:8766";
+const CODEX_BRIDGE_BOOT_COMMAND = "npm --prefix /Users/amir/Downloads/MyMake run codex-bridge";
 const EMPTY_REVISIONS: RevisionRecord[] = [];
 const EMPTY_ATTACHMENTS: AttachmentRecord[] = [];
 const EMPTY_TURNS: ConversationTurnRecord[] = [];
@@ -1230,9 +1231,8 @@ function CodexSettingsModal({
         ) : (
           <div className="mt-5 rounded-[20px] border border-amber-300/18 bg-amber-300/10 px-4 py-4 text-sm leading-7 text-amber-100">
             MyMake could not reach the local Codex bridge yet. Start it once with{" "}
-            <span className="font-semibold text-white">npm run codex-bridge</span> from{" "}
-            <span className="font-semibold text-white">/Users/amir/Downloads/MyMake</span>, then reopen
-            this panel to enable login-at-startup and session mode controls.
+            <span className="font-semibold text-white">{CODEX_BRIDGE_BOOT_COMMAND}</span>, then
+            reopen this panel to enable login-at-startup and session mode controls.
           </div>
         )}
       </div>
@@ -1776,11 +1776,11 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       }
     } catch {
       throw new RequestError(
-        "MyMake could not reach the local Codex bridge. Start it on this Mac with `npm run codex-bridge` from /Users/amir/Downloads/MyMake.",
+        `MyMake could not reach the local Codex bridge. Start it on this Mac with \`${CODEX_BRIDGE_BOOT_COMMAND}\`.`,
         {
           details: [
             "Codex local mode runs through a local bridge on http://127.0.0.1:8766.",
-            "Open a terminal on this Mac and run: npm run codex-bridge",
+            `Open a terminal on this Mac and run: ${CODEX_BRIDGE_BOOT_COMMAND}`,
           ],
         },
       );
@@ -3263,7 +3263,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                       <>
                         Codex mode runs locally on this Mac through the MyMake bridge. If it is not
                         running yet, start it with{" "}
-                        <span className="font-semibold text-white">npm run codex-bridge</span>.
+                        <span className="font-semibold text-white">{CODEX_BRIDGE_BOOT_COMMAND}</span>.
                       </>
                     )}
                   </div>
