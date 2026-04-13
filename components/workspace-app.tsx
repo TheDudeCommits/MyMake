@@ -61,6 +61,7 @@ const DEVICE_PRESETS: Record<
 
 const DEVICE_ORDER: DevicePreset[] = ["desktop", "tablet", "mobile"];
 const AI_MODEL_STORAGE_KEY = "mymake-selected-ai-model";
+const CODEX_BRIDGE_ORIGIN = "http://127.0.0.1:8766";
 const EMPTY_REVISIONS: RevisionRecord[] = [];
 const EMPTY_ATTACHMENTS: AttachmentRecord[] = [];
 const EMPTY_TURNS: ConversationTurnRecord[] = [];
@@ -99,6 +100,14 @@ type SnapshotResponse = DashboardSnapshot & {
     changedFiles: Array<{ path: string; reason?: string }>;
   };
   feedback?: string | null;
+};
+
+type CodexBridgeEditResponse = {
+  ok: true;
+  projectId: string;
+  threadId: string;
+  summary: string;
+  changedFiles: Array<{ path: string; reason?: string }>;
 };
 
 class RequestError extends Error {
@@ -1424,6 +1433,179 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     return payload;
   }
 
+  async function readBridgeJson<T>(response: Response): Promise<T> {
+    const payload = (await response.json()) as T & {
+      error?: string;
+      details?: string[];
+    };
+
+    if (!response.ok) {
+      throw new RequestError(payload.error || "The local Codex bridge request failed.", {
+        details: Array.isArray(payload.details) ? payload.details : [],
+      });
+    }
+
+    return payload;
+  }
+
+  async function ensureCodexBridgeAvailable() {
+    try {
+      const response = await fetch(`${CODEX_BRIDGE_ORIGIN}/health`, {
+        cache: "no-store",
+      });
+      await readBridgeJson<{ ok: boolean }>(response);
+    } catch {
+      throw new RequestError(
+        "MyMake could not reach the local Codex bridge. Start it on this Mac with `npm run codex-bridge` from /Users/amir/Downloads/MyMake.",
+        {
+          details: [
+            "Codex local mode runs through a local bridge on http://127.0.0.1:8766.",
+            "Open a terminal on this Mac and run: npm run codex-bridge",
+          ],
+        },
+      );
+    }
+  }
+
+  async function syncCodexBridgeWorkspace(projectId: string, revisionId: string) {
+    const exportResponse = await fetch(`/api/projects/${projectId}/export`, {
+      cache: "no-store",
+    });
+    if (!exportResponse.ok) {
+      throw new RequestError("MyMake could not export the current project snapshot for Codex.");
+    }
+
+    const zipBlob = await exportResponse.blob();
+    const syncResponse = await fetch(`${CODEX_BRIDGE_ORIGIN}/v1/projects/${projectId}/workspace`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/zip",
+        "X-MyMake-Project-Name": currentProject?.project.name || projectId,
+        "X-MyMake-Revision-Id": revisionId,
+        "X-MyMake-User-Id": viewer?.id || "",
+      },
+      body: zipBlob,
+    });
+    await readBridgeJson<{ ok: boolean }>(syncResponse);
+  }
+
+  async function runCodexBridgeTurn(projectId: string, previousFailures: string[]) {
+    const bridgeResponse = await fetch(`${CODEX_BRIDGE_ORIGIN}/v1/projects/${projectId}/edit`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt,
+        projectName: currentProject?.project.name || projectId,
+        userId: viewer?.id || null,
+        currentRoute,
+        selection: selectedElement,
+        previousFailures,
+      }),
+    });
+    return readBridgeJson<CodexBridgeEditResponse>(bridgeResponse);
+  }
+
+  async function exportCodexBridgeWorkspace(projectId: string): Promise<Blob> {
+    const url = new URL(`${CODEX_BRIDGE_ORIGIN}/v1/projects/${projectId}/export`);
+    if (viewer?.id) {
+      url.searchParams.set("userId", viewer.id);
+    }
+
+    const response = await fetch(url.toString(), {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new RequestError("The local Codex bridge could not export its updated workspace.");
+    }
+
+    return response.blob();
+  }
+
+  async function applyCodexBridgeWorkspace(
+    projectId: string,
+    bridgeResult: CodexBridgeEditResponse,
+  ) {
+    const zipBlob = await exportCodexBridgeWorkspace(projectId);
+    const formData = new FormData();
+    formData.append("file", new File([zipBlob], `${projectId}.zip`, { type: "application/zip" }));
+    formData.append("prompt", prompt);
+    formData.append("summary", bridgeResult.summary);
+    formData.append("threadId", bridgeResult.threadId);
+    formData.append("selection", JSON.stringify(selectedElement));
+    formData.append("changedFiles", JSON.stringify(bridgeResult.changedFiles));
+
+    const response = await fetch(`/api/projects/${projectId}/codex/apply`, {
+      method: "POST",
+      body: formData,
+    });
+    return readJsonResponse<SnapshotResponse>(response);
+  }
+
+  async function handleCodexBridgeEdit() {
+    if (!currentProject?.project.currentRevisionId) {
+      return;
+    }
+
+    const maxAttempts = 3;
+    let previousFailures: string[] = [];
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        setFeedback(
+          attempt === 1
+            ? "Syncing the project into your local Codex workspace..."
+            : `Codex is retrying with the latest failure context (${attempt}/${maxAttempts})...`,
+        );
+        await ensureCodexBridgeAvailable();
+        await syncCodexBridgeWorkspace(
+          currentProject.project.id,
+          currentProject.project.currentRevisionId,
+        );
+
+        setFeedback(`Codex is working locally on the project (${attempt}/${maxAttempts})...`);
+        const bridgeResult = await runCodexBridgeTurn(
+          currentProject.project.id,
+          previousFailures,
+        );
+
+        if (!bridgeResult.changedFiles.length) {
+          throw new RequestError("Codex finished without making any file changes.", {
+            details: [
+              "MyMake retried automatically because the local Codex workspace stayed unchanged.",
+            ],
+          });
+        }
+
+        setFeedback("Applying Codex changes back into MyMake and validating the preview...");
+        const snapshotResponse = await applyCodexBridgeWorkspace(
+          currentProject.project.id,
+          bridgeResult,
+        );
+        applySnapshot(snapshotResponse);
+        setPrompt("");
+        return;
+      } catch (caughtError) {
+        lastError = caughtError;
+        const details =
+          caughtError instanceof RequestError
+            ? [caughtError.message, ...caughtError.details]
+            : [caughtError instanceof Error ? caughtError.message : "Codex bridge failed."];
+        previousFailures = Array.from(new Set([...previousFailures, ...details].filter(Boolean)));
+
+        if (attempt >= maxAttempts) {
+          throw caughtError;
+        }
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("Codex bridge could not land the edit.");
+  }
+
   function syncBrowserLocation(projectId: string | null) {
     if (typeof window === "undefined") {
       return;
@@ -1638,6 +1820,21 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
   async function handleAiEdit() {
     if (!currentProject?.project.currentRevisionId || !prompt.trim()) {
+      return;
+    }
+
+    if (selectedAiModel?.key === "openai-codex") {
+      setIsRunningAi(true);
+      setError(null);
+      clearComposerDiagnostics();
+
+      try {
+        await handleCodexBridgeEdit();
+      } catch (caughtError) {
+        recordComposerError(caughtError, "Codex could not land the edit.");
+      } finally {
+        setIsRunningAi(false);
+      }
       return;
     }
 
@@ -2602,6 +2799,12 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
               ) : null}
 
               <div className="rounded-[18px] border border-white/[0.08] bg-[#2d2d2f] p-2.5">
+                {selectedAiModel?.key === "openai-codex" ? (
+                  <div className="mb-2 rounded-[12px] border border-[#7f82ff]/20 bg-[#22232b] px-3 py-2 text-[11px] leading-5 text-slate-300">
+                    Codex mode runs locally on this Mac through the MyMake bridge. If it is not
+                    running yet, start it with <span className="font-semibold text-white">npm run codex-bridge</span>.
+                  </div>
+                ) : null}
                 <textarea
                   className="h-[76px] w-full resize-none rounded-[14px] border border-white/[0.08] bg-[#262628] px-3.5 py-3 text-sm leading-6 text-white outline-none transition placeholder:text-slate-500 focus:border-white/[0.18]"
                   placeholder="Ask for changes"

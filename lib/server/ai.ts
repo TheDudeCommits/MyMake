@@ -57,7 +57,9 @@ export function listAiModels(): AiModelOption[] {
     label: model.label,
     provider: model.provider,
     enabled:
-      model.provider === "openai"
+      model.key === "openai-codex"
+        ? true
+        : model.provider === "openai"
         ? Boolean(env.openaiApiKey)
         : Boolean(env.anthropicApiKey),
   }));

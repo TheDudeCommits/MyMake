@@ -32,6 +32,7 @@ import {
   collectContextGraph,
   describeKitAssets,
   ensureProjectKnowledgeArtifacts,
+  inferEditMode,
   readKnowledgeFiles,
   updateEditMemory,
   type KnowledgeArtifacts,
@@ -2975,6 +2976,262 @@ Fix the root cause before applying the edit. You may update related files, style
       ensurePreview: false,
     }),
   };
+}
+
+async function collectExistingChangedFiles(
+  projectDir: string,
+  changedFiles: Array<{ path: string; reason?: string }>,
+): Promise<Array<{ path: string; content: string; reason?: string }>> {
+  const collected: Array<{ path: string; content: string; reason?: string }> = [];
+
+  for (const changedFile of changedFiles) {
+    const normalizedPath = toPosixPath(changedFile.path);
+    const absolutePath = path.join(projectDir, normalizedPath);
+    if (!isTextLikeFile(absolutePath)) {
+      continue;
+    }
+
+    try {
+      const stats = await fs.stat(absolutePath);
+      if (!stats.isFile()) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+
+    collected.push({
+      path: normalizedPath,
+      content: await fs.readFile(absolutePath, "utf8"),
+      reason: changedFile.reason,
+    });
+  }
+
+  return collected;
+}
+
+export async function applyCodexBridgeWorkspace(params: {
+  projectId: string;
+  zipBuffer: Buffer;
+  prompt: string;
+  selection: SelectionPayload | null;
+  summary: string;
+  threadId?: string | null;
+  changedFiles?: Array<{ path: string; reason?: string }>;
+}): Promise<{
+  summary: string;
+  warnings: string[];
+  changedFiles: Array<{ path: string; reason?: string }>;
+  workspace: ProjectWorkspace;
+}> {
+  const userId = await requireCurrentUserId();
+  const project = getProjectRow(params.projectId, userId);
+  const currentRevision = project.currentRevisionId ? getRevisionById(project.currentRevisionId) : null;
+
+  if (!currentRevision) {
+    throw new Error("The selected revision is out of date. Refresh and try again.");
+  }
+
+  await pruneRedoBranch(params.projectId, userId);
+
+  const runtime = requireRuntime(await detectProjectRuntime(project.extractedPath));
+  const knowledge = await readKnowledgeFiles(project.extractedPath);
+  const selectionTarget = await buildSelectionTarget({
+    projectDir: project.extractedPath,
+    route: params.selection?.route || "/",
+    currentFilePath: null,
+    selection: params.selection,
+    componentIndex: knowledge.componentIndex,
+  });
+  const editMode = inferEditMode({
+    prompt: params.prompt,
+    selectionTarget,
+    runtime,
+  });
+  const provider = "openai" as const;
+
+  const userTurn = await createConversationTurn({
+    projectId: params.projectId,
+    revisionId: currentRevision.id,
+    kind: "user",
+    status: "pending",
+    prompt: params.prompt.trim(),
+    aiModelKey: "openai-codex",
+    provider,
+    editMode,
+    selectionTarget,
+  });
+
+  const unpackDir = path.join(getProjectPaths(params.projectId).root, `codex-import-${Date.now()}`);
+
+  try {
+    await extractZipBufferToDirectory(params.zipBuffer, unpackDir);
+
+    const validation = await validateProjectDirectory(unpackDir);
+    if (!validation.ok) {
+      throw new Error(validation.reason);
+    }
+
+    await normalizeImportedProject(unpackDir);
+    await syncSnapshotToCurrent(unpackDir, project.extractedPath);
+
+    if (requireRuntime(await detectProjectRuntime(project.extractedPath)) === "static") {
+      await ensureStaticEditableOverridesSupport(project.extractedPath);
+    }
+
+    const nextManifestHash = await readManifestHash(project.extractedPath);
+    if (nextManifestHash !== project.manifestHash) {
+      await installDependenciesWithRecovery(
+        params.projectId,
+        project.extractedPath,
+        project.packageManager,
+      );
+    }
+
+    const concreteChangedFiles = await collectExistingChangedFiles(
+      project.extractedPath,
+      params.changedFiles || [],
+    );
+    const validationResultData = await runEditValidation({
+      projectId: params.projectId,
+      projectDir: project.extractedPath,
+      changedFiles: concreteChangedFiles,
+      prompt: params.prompt,
+      editMode,
+      selection: params.selection,
+      selectionTarget,
+      rawProviderOutput: params.threadId
+        ? JSON.stringify({ bridge: "codex-local", threadId: params.threadId })
+        : "codex-local",
+    });
+
+    const revision = await createRevision({
+      projectId: params.projectId,
+      label: params.prompt.trim(),
+      source: "ai",
+      summary: params.summary,
+      ownerUserId: userId,
+    });
+
+    const validationResult = await createValidationResultRecord({
+      ...validationResultData,
+      revisionId: revision.id,
+    });
+    const warnings = [...validationResult.warnings];
+
+    if (params.threadId) {
+      warnings.push(`Codex local thread ${params.threadId} applied this checkpoint.`);
+    }
+
+    const assistantTurn = await createConversationTurn({
+      projectId: params.projectId,
+      revisionId: revision.id,
+      kind: "assistant",
+      status: "applied",
+      summary: params.summary,
+      aiModelKey: "openai-codex",
+      provider,
+      editMode,
+      selectionTarget,
+      changedFiles: (params.changedFiles || []).map((item) => ({
+        path: toPosixPath(item.path),
+        reason: item.reason,
+      })),
+      warnings,
+      validationResultId: validationResult.id,
+    });
+
+    getDb()
+      .prepare(
+        `UPDATE validation_results
+            SET turn_id = ?
+          WHERE id = ?`,
+      )
+      .run(assistantTurn.id, validationResult.id);
+    getDb().prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`).run("applied", userTurn.id);
+
+    await updateEditMemory({
+      projectDir: project.extractedPath,
+      prompt: params.prompt.trim(),
+      summary: params.summary,
+      editMode,
+      target: selectionTarget,
+      changedFiles: (params.changedFiles || []).map((item) => toPosixPath(item.path)),
+      createdAt: revision.createdAt,
+    });
+    await syncProjectKnowledgeAndKits(
+      getProjectRow(params.projectId, userId),
+      requireRuntime(await detectProjectRuntime(project.extractedPath)),
+    );
+
+    return {
+      summary: params.summary,
+      warnings,
+      changedFiles: (params.changedFiles || []).map((item) => ({
+        path: toPosixPath(item.path),
+        reason: item.reason,
+      })),
+      workspace: await getWorkspaceSnapshot(params.projectId, { ensurePreview: false }),
+    };
+  } catch (error) {
+    await syncSnapshotToCurrent(currentRevision.snapshotPath, project.extractedPath).catch(() => undefined);
+    if (runtime === "static") {
+      await ensureStaticEditableOverridesSupport(project.extractedPath).catch(() => undefined);
+    }
+    const rollbackManifestHash = await readManifestHash(project.extractedPath).catch(() => project.manifestHash);
+    if (rollbackManifestHash !== project.manifestHash) {
+      await installDependenciesWithRecovery(
+        params.projectId,
+        project.extractedPath,
+        project.packageManager,
+      ).catch(() => undefined);
+    }
+    await restartPreviewRunner(params.projectId).catch(() => undefined);
+
+    const validationResult = await createValidationResultRecord({
+      projectId: params.projectId,
+      revisionId: currentRevision.id,
+      status: "failed",
+      buildStatus: "failed",
+      previewStatus: "failed",
+      selectorStatus: selectionTarget ? "warning" : "skipped",
+      importsStatus: "failed",
+      designStatus: "skipped",
+      warnings: [],
+      details: [
+        error instanceof Error ? error.message : "Codex bridge changes failed validation.",
+        "MyMake restored the last working checkpoint automatically.",
+      ],
+      rawProviderOutput: params.threadId
+        ? JSON.stringify({ bridge: "codex-local", threadId: params.threadId })
+        : "codex-local",
+      retryable: true,
+    });
+
+    await createConversationTurn({
+      projectId: params.projectId,
+      revisionId: currentRevision.id,
+      kind: "assistant",
+      status: "failed",
+      summary:
+        error instanceof Error
+          ? error.message
+          : "Codex bridge changes could not be applied safely.",
+      aiModelKey: "openai-codex",
+      provider,
+      editMode,
+      selectionTarget,
+      warnings: validationResult.warnings,
+      validationResultId: validationResult.id,
+    });
+    getDb().prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`).run("failed", userTurn.id);
+
+    throw error instanceof Error
+      ? error
+      : new Error("Codex bridge changes could not be applied safely.");
+  } finally {
+    await fs.rm(unpackDir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 async function switchToRevision(
