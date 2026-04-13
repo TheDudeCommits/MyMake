@@ -1229,6 +1229,93 @@ function extractColorValue(prompt: string): string | null {
   return namedColorMatch?.[1] || null;
 }
 
+const COLOR_NAME_TO_HEX: Record<string, string> = {
+  red: "#ef4444",
+  green: "#22c55e",
+  blue: "#3b82f6",
+  white: "#ffffff",
+  black: "#000000",
+  gray: "#9ca3af",
+  grey: "#9ca3af",
+  orange: "#f97316",
+  yellow: "#facc15",
+  purple: "#8b5cf6",
+  pink: "#ec4899",
+  emerald: "#10b981",
+  teal: "#14b8a6",
+  cyan: "#06b6d4",
+};
+
+function normalizeColorToken(raw: string | null): string | null {
+  if (!raw) {
+    return null;
+  }
+
+  if (/^#[0-9a-f]{3,8}$/i.test(raw)) {
+    return raw;
+  }
+
+  return COLOR_NAME_TO_HEX[raw.toLowerCase()] || raw.toLowerCase();
+}
+
+function extractDirectionalTrendInstruction(prompt: string): {
+  upColor: string;
+  downColor: string;
+  lineOnly: boolean;
+} | null {
+  const normalized = prompt.toLowerCase();
+  if (!/\b(upward|uptrend|up trend|upward trend|upward trends|higher|rising|positive)\b/.test(normalized)) {
+    return null;
+  }
+  if (!/\b(downward|downtrend|down trend|downward trend|downward trends|lower|falling|negative)\b/.test(normalized)) {
+    return null;
+  }
+
+  const colorPattern = /(#[0-9a-f]{3,8}\b|red|green|blue|white|black|gray|grey|orange|yellow|purple|pink|emerald|teal|cyan)/i;
+  const upMatch = prompt.match(
+    new RegExp(
+      String.raw`\b(?:upward|uptrend|up trend|upward trend|upward trends|higher|rising|positive)\b[\s\S]{0,40}?${colorPattern.source}`,
+      "i",
+    ),
+  );
+  const downMatch = prompt.match(
+    new RegExp(
+      String.raw`\b(?:downward|downtrend|down trend|downward trend|downward trends|lower|falling|negative)\b[\s\S]{0,40}?${colorPattern.source}`,
+      "i",
+    ),
+  );
+
+  const colorMentions = [...prompt.matchAll(new RegExp(colorPattern.source, "gi"))].map((match) =>
+    normalizeColorToken(match[0]),
+  );
+
+  const upColor = normalizeColorToken(upMatch?.at(-1) || null) || colorMentions.find(Boolean) || "#22c55e";
+  let downColor =
+    normalizeColorToken(downMatch?.at(-1) || null) ||
+    colorMentions.find((value) => value && value !== upColor) ||
+    null;
+
+  if (!downColor && upColor === "#22c55e") {
+    downColor = "#ef4444";
+  }
+
+  if (!downColor) {
+    return null;
+  }
+
+  const lineOnly =
+    /\bonly\b[\s\S]{0,24}\bline/.test(normalized) ||
+    /\bonly\b[\s\S]{0,24}\bstroke/.test(normalized) ||
+    /\bnot\b[\s\S]{0,36}\b(shade|shades|fill|area|gradient)/.test(normalized) ||
+    /\bwithout\b[\s\S]{0,24}\b(fill|area|gradient|shade)/.test(normalized);
+
+  return {
+    upColor,
+    downColor,
+    lineOnly,
+  };
+}
+
 function resolveEditIntent(params: {
   prompt: string;
   target: SelectionTarget | null;
@@ -1273,6 +1360,20 @@ function resolveEditIntent(params: {
       kind: "replace-text",
       confidence: 0.9,
       summary: "Replace the selected text content.",
+    };
+  }
+
+  const directionalTrendInstruction = extractDirectionalTrendInstruction(prompt);
+  if (
+    directionalTrendInstruction &&
+    target?.visualType === "chart-line" &&
+    Boolean(target.resolvedHandles.some((handle) => handle.key === "line-color"))
+  ) {
+    return {
+      kind: "set-directional-trend-colors",
+      confidence: 0.95,
+      requestedValue: JSON.stringify(directionalTrendInstruction),
+      summary: "Update upward and downward trend line colors for the selected chart.",
     };
   }
 

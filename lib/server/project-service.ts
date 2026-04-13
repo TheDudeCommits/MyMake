@@ -2553,6 +2553,64 @@ function collectStableTargetAnchors(selectionTarget: SelectionTarget | null): st
   ).slice(0, 8);
 }
 
+function parseDirectionalTrendIntentValue(intent: EditIntent): {
+  upColor: string;
+  downColor: string;
+  lineOnly: boolean;
+} | null {
+  if (intent.kind !== "set-directional-trend-colors" || !intent.requestedValue) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(intent.requestedValue) as {
+      upColor?: string;
+      downColor?: string;
+      lineOnly?: boolean;
+    };
+
+    if (!parsed.upColor || !parsed.downColor) {
+      return null;
+    }
+
+    return {
+      upColor: parsed.upColor,
+      downColor: parsed.downColor,
+      lineOnly: Boolean(parsed.lineOnly),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function inferSelectedInstanceLabel(selectionTarget: SelectionTarget | null, content: string): string | null {
+  if (!selectionTarget) {
+    return null;
+  }
+
+  const candidates = uniqueStrings(
+    [
+      selectionTarget.label,
+      ...(selectionTarget.payload.contextTexts || []),
+      selectionTarget.sectionName || "",
+    ]
+      .map((value) => value.replace(/\s+/g, " ").trim())
+      .filter((value) => value.length >= 2 && value.length <= 40),
+  );
+
+  for (const candidate of candidates) {
+    const escaped = escapeRegExp(candidate);
+    if (
+      new RegExp(`label=["']${escaped}["']`).test(content) ||
+      new RegExp(`title=["']${escaped}["']`).test(content)
+    ) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 function replaceStyleValueWithKeywords(params: {
   content: string;
   keywords: string[];
@@ -2657,6 +2715,135 @@ async function tryApplyDeterministicStyleReplacement(params: {
   return null;
 }
 
+async function tryApplyDirectionalTrendEdit(params: {
+  projectDir: string;
+  selectionTarget: SelectionTarget | null;
+  intent: EditIntent;
+  allowedFiles: string[];
+}): Promise<
+  | {
+      summary: string;
+      warnings: string[];
+      changedFiles: Array<{ path: string; content: string; reason?: string }>;
+      rawResponse: string | null;
+    }
+  | null
+> {
+  const instruction = parseDirectionalTrendIntentValue(params.intent);
+  if (!params.selectionTarget || !instruction) {
+    return null;
+  }
+
+  for (const filePath of params.allowedFiles) {
+    const absolutePath = resolveInsideRoot(params.projectDir, filePath);
+    if (!isTextLikeFile(absolutePath)) {
+      continue;
+    }
+
+    const currentContent = await fs.readFile(absolutePath, "utf8");
+    let nextContent = currentContent;
+    const selectedLabel = inferSelectedInstanceLabel(params.selectionTarget, currentContent);
+    let appliedScopedPatch = false;
+
+    if (
+      /function buildDirectionalSegments\s*\(/.test(nextContent) &&
+      /function DepositCard\s*\(/.test(nextContent) &&
+      selectedLabel
+    ) {
+      if (!/upTrendColor\?: string;/.test(nextContent)) {
+        nextContent = nextContent.replace(
+          /(\s*accent\?: boolean;\s*\n\s*delay\?: number;\s*\n)/,
+          `$1  upTrendColor?: string;\n  downTrendColor?: string;\n  areaOpacity?: number;\n`,
+        );
+      }
+
+      nextContent = nextContent.replace(
+        /function buildDirectionalSegments\(\s*([\s\S]*?)gradientPrefix: string,\s*\n\): TrendSegment\[] \{/,
+        `function buildDirectionalSegments(\n  $1gradientPrefix: string,\n  upTrendColor: string,\n  downTrendColor: string,\n): TrendSegment[] {`,
+      );
+      nextContent = nextContent.replace(
+        /const color = isUpTrend \? UP_TREND_COLOR : DOWN_TREND_COLOR;/,
+        "const color = isUpTrend ? upTrendColor : downTrendColor;",
+      );
+
+      nextContent = nextContent.replace(
+        /(\s*accent = false,\s*\n\s*delay = 0,\s*\n)/,
+        `$1  upTrendColor = UP_TREND_COLOR,\n  downTrendColor = DOWN_TREND_COLOR,\n  areaOpacity = 0.2,\n`,
+      );
+      nextContent = nextContent.replace(
+        /buildDirectionalSegments\(chartData, gradientId\)/,
+        "buildDirectionalSegments(chartData, gradientId, upTrendColor, downTrendColor)",
+      );
+      nextContent = nextContent.replace(
+        /stopColor=\{segment\.color\} stopOpacity=\{0\.2\}/g,
+        "stopColor={segment.color} stopOpacity={areaOpacity}",
+      );
+      nextContent = nextContent.replace(
+        /stopColor=\{UP_TREND_COLOR\} stopOpacity=\{0\.2\}/g,
+        "stopColor={upTrendColor} stopOpacity={areaOpacity}",
+      );
+
+      const labelPattern = new RegExp(
+        `(<DepositCard[\\s\\S]*?label=["']${escapeRegExp(selectedLabel)}["'][\\s\\S]*?)(/>)`,
+      );
+      const existingMatch = nextContent.match(labelPattern);
+      if (existingMatch) {
+        let scopedInstance = existingMatch[1];
+        if (!/upTrendColor=/.test(scopedInstance)) {
+          scopedInstance += `\n          upTrendColor="${instruction.upColor}"`;
+        }
+        if (!/downTrendColor=/.test(scopedInstance)) {
+          scopedInstance += `\n          downTrendColor="${instruction.downColor}"`;
+        }
+        if (instruction.lineOnly && !/areaOpacity=/.test(scopedInstance)) {
+          scopedInstance += `\n          areaOpacity={0}`;
+        }
+        nextContent = nextContent.replace(labelPattern, `${scopedInstance}$2`);
+        appliedScopedPatch = true;
+      }
+    }
+
+    if (!appliedScopedPatch && /UP_TREND_COLOR/.test(nextContent) && /DOWN_TREND_COLOR/.test(nextContent)) {
+      nextContent = nextContent.replace(
+        /const UP_TREND_COLOR = ["'][^"']+["'];/,
+        `const UP_TREND_COLOR = "${instruction.upColor}";`,
+      );
+      nextContent = nextContent.replace(
+        /const DOWN_TREND_COLOR = ["'][^"']+["'];/,
+        `const DOWN_TREND_COLOR = "${instruction.downColor}";`,
+      );
+
+      if (instruction.lineOnly) {
+        nextContent = nextContent.replace(
+          /stopOpacity=\{0\.2\}/g,
+          "stopOpacity={0}",
+        );
+      }
+    }
+
+    if (nextContent === currentContent) {
+      continue;
+    }
+
+    return {
+      summary: appliedScopedPatch
+        ? `Updated the ${selectedLabel} trend line colors without tinting unrelated chart fills.`
+        : "Updated directional trend colors for the resolved chart component.",
+      warnings: [],
+      changedFiles: [
+        {
+          path: filePath,
+          content: nextContent,
+          reason: params.intent.summary,
+        },
+      ],
+      rawResponse: null,
+    };
+  }
+
+  return null;
+}
+
 async function tryApplyDeterministicEdit(params: {
   projectDir: string;
   prompt: string;
@@ -2685,9 +2872,19 @@ async function tryApplyDeterministicEdit(params: {
 
   if (
     params.intent.kind === "set-line-color" ||
+    params.intent.kind === "set-directional-trend-colors" ||
     params.intent.kind === "set-fill-color" ||
     params.intent.kind === "set-background-color"
   ) {
+    if (params.intent.kind === "set-directional-trend-colors") {
+      return tryApplyDirectionalTrendEdit({
+        projectDir: params.projectDir,
+        selectionTarget: params.selectionTarget,
+        intent: params.intent,
+        allowedFiles: params.candidateFiles,
+      });
+    }
+
     return tryApplyDeterministicStyleReplacement({
       projectDir: params.projectDir,
       selectionTarget: params.selectionTarget,
@@ -2729,19 +2926,33 @@ function validateTargetPersistence(params: {
       );
     } else if (
       params.editPlan.intent.kind === "set-line-color" ||
+      params.editPlan.intent.kind === "set-directional-trend-colors" ||
       params.editPlan.intent.kind === "set-fill-color" ||
       params.editPlan.intent.kind === "set-background-color"
     ) {
-      const nextValue = params.editPlan.intent.requestedValue || "";
-      const relevantKeyword =
-        params.editPlan.intent.kind === "set-line-color"
-          ? /stroke/i
-          : params.editPlan.intent.kind === "set-fill-color"
-            ? /fill/i
-            : /background|fill/i;
-      changedIntendedTarget = params.changedFiles.some(
-        (file) => file.content.includes(nextValue) && relevantKeyword.test(file.content),
-      );
+      if (params.editPlan.intent.kind === "set-directional-trend-colors") {
+        const directionalInstruction = parseDirectionalTrendIntentValue(params.editPlan.intent);
+        changedIntendedTarget = Boolean(
+          directionalInstruction &&
+            params.changedFiles.some(
+              (file) =>
+                file.content.includes(directionalInstruction.upColor) &&
+                file.content.includes(directionalInstruction.downColor) &&
+                /stroke|UP_TREND_COLOR|DOWN_TREND_COLOR/i.test(file.content),
+            ),
+        );
+      } else {
+        const nextValue = params.editPlan.intent.requestedValue || "";
+        const relevantKeyword =
+          params.editPlan.intent.kind === "set-line-color"
+            ? /stroke/i
+            : params.editPlan.intent.kind === "set-fill-color"
+              ? /fill/i
+              : /background|fill/i;
+        changedIntendedTarget = params.changedFiles.some(
+          (file) => file.content.includes(nextValue) && relevantKeyword.test(file.content),
+        );
+      }
     } else if (params.editPlan.intent.kind === "set-visibility") {
       changedIntendedTarget = changedPaths.some((filePath) => filePath === OVERRIDES_CONFIG_PATH);
     } else {

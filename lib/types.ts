@@ -33,6 +33,7 @@ export type ExecutionLane = "deterministic" | "scoped-ai" | "deep-fix";
 export type EditIntentKind =
   | "replace-text"
   | "set-line-color"
+  | "set-directional-trend-colors"
   | "set-fill-color"
   | "set-background-color"
   | "set-spacing"

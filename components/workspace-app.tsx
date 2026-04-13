@@ -1739,17 +1739,43 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   }, [currentProject, isPicking]);
 
   async function readJsonResponse<T>(response: Response): Promise<T> {
-    const payload = (await response.json()) as T & {
+    const rawBody = await response.text();
+    let payload: (T & {
       error?: string;
       details?: string[];
       rawProviderOutput?: string | null;
-    };
+    }) | null = null;
+
+    try {
+      payload = rawBody ? (JSON.parse(rawBody) as T & {
+        error?: string;
+        details?: string[];
+        rawProviderOutput?: string | null;
+      }) : null;
+    } catch {
+      if (!response.ok) {
+        throw new RequestError(
+          `Request failed (${response.status}${response.statusText ? ` ${response.statusText}` : ""}).`,
+          {
+            details: rawBody ? [rawBody.slice(0, 1200)] : [],
+            rawProviderOutput: null,
+          },
+        );
+      }
+
+      throw new Error("The server returned an invalid response.");
+    }
+
     if (!response.ok) {
-      throw new RequestError((payload as { error?: string }).error || "Request failed.", {
-        details: Array.isArray(payload.details) ? payload.details : [],
+      throw new RequestError(payload?.error || `Request failed (${response.status}).`, {
+        details: Array.isArray(payload?.details) ? payload.details : [],
         rawProviderOutput:
-          typeof payload.rawProviderOutput === "string" ? payload.rawProviderOutput : null,
+          typeof payload?.rawProviderOutput === "string" ? payload.rawProviderOutput : null,
       });
+    }
+
+    if (!payload) {
+      throw new Error("The server returned an empty response.");
     }
 
     return payload;

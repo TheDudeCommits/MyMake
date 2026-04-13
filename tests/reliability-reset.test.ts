@@ -279,6 +279,64 @@ test("buildEditPlan routes simple chart-line changes through the deterministic l
   assert.equal(plan.requiresConfirmation, false);
 });
 
+test("buildEditPlan routes directional chart-line prompts through the deterministic lane", async () => {
+  const selectionTarget = {
+    targetId: "target-3",
+    fingerprint: "path::virtual-card::stroke",
+    route: "/",
+    label: "Virtual",
+    summary: "Virtual / Deposits / $9.80M",
+    sourceFilePath: "src/app/components/DepositsBreakdown.tsx",
+    sourceCandidates: [
+      {
+        path: "src/app/components/DepositsBreakdown.tsx",
+        score: 240,
+        reason: "matches React source hint; contains \"Virtual\"; contains \"Deposits\"",
+        matchedTerms: ["virtual", "deposits", "sparkline"],
+      },
+    ],
+    confidence: 0.94,
+    componentName: "Deposits Breakdown",
+    sectionName: "Deposits Breakdown",
+    repeatGroup: "Card",
+    instanceScope: ".deposit-card:nth-of-type(1)",
+    visualType: "chart-line",
+    resolvedHandles: [
+      {
+        key: "line-color",
+        label: "Line color",
+        confidence: 0.98,
+        currentValue: "#8b949e",
+      },
+    ],
+    editableCapabilities: [
+      { key: "line-color", label: "Line color", confidence: 0.98 },
+      { key: "visibility", label: "Visibility", confidence: 0.9 },
+    ],
+    payload: createSelection({
+      nearestFramerName: "Virtual",
+      contextTexts: ["Virtual", "Deposits", "$9.80M", "Deposits Breakdown"],
+      reactComponentStack: ["DepositCard", "DepositsBreakdown", "App"],
+      reactSourceHints: ["DepositsBreakdown.tsx", "DepositCard", "Virtual"],
+    }),
+  } satisfies SelectionTarget;
+
+  const plan = buildEditPlan({
+    currentFilePath: "src/app/components/DepositsBreakdown.tsx",
+    currentFileContent: "const UP_TREND_COLOR = '#8b949e'; const DOWN_TREND_COLOR = '#8b949e';",
+    prompt:
+      "Make all the downward trends red and all the upward ones green. But only color the lines themselves and not the shades below them.",
+    runtime: "vite",
+    selectionTarget,
+    contextGraph: createContextGraph(["src/app/components/DepositsBreakdown.tsx"], selectionTarget),
+    hasStaticEditableSupport: false,
+  });
+
+  assert.equal(plan.intent.kind, "set-directional-trend-colors");
+  assert.equal(plan.lane, "deterministic");
+  assert.equal(plan.strategy, "direct-property");
+});
+
 test("buildEditPlan requires confirmation when target confidence is low", async () => {
   const selectionTarget = {
     targetId: "target-2",
