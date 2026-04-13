@@ -34,7 +34,15 @@ export const BRAND_KIT_PATH = `${MYMAKE_DIR}/brand_kit.json`;
 export const COMPONENT_INDEX_PATH = `${MYMAKE_DIR}/component_index.json`;
 export const EDIT_MEMORY_PATH = `${MYMAKE_DIR}/edit_memory.json`;
 
-const HIDDEN_DIRS = new Set([".git", ".next", "node_modules", "__MACOSX", MYMAKE_DIR]);
+const HIDDEN_DIRS = new Set([
+  ".git",
+  ".next",
+  "node_modules",
+  "__MACOSX",
+  "dist",
+  "build",
+  MYMAKE_DIR,
+]);
 const STYLE_FILE_HINTS = [
   "globals.css",
   "tailwind",
@@ -561,6 +569,8 @@ function buildSelectionFingerprint(selection: SelectionPayload): string {
         scopedSelector: selection.scopedSelector,
         text: selection.textContent.slice(0, 160),
         framerPath: selection.framerPath,
+        reactComponentStack: selection.reactComponentStack || [],
+        reactSourceHints: selection.reactSourceHints || [],
       }),
     )
     .digest("hex");
@@ -616,11 +626,20 @@ function inferResolvedHandles(selection: SelectionPayload): ResolvedHandle[] {
   return [...handles.values()].sort((left, right) => right.confidence - left.confidence);
 }
 
+function normalizeHintValue(value: string): string {
+  return humanizeIdentifier(value)
+    .toLowerCase()
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
 function collectSelectionSearchTerms(selection: SelectionPayload): string[] {
   return unique([
     selection.nearestFramerName || "",
     selection.textContent || "",
     ...(selection.contextTexts || []),
+    ...(selection.reactComponentStack || []),
+    ...(selection.reactSourceHints || []),
     ...selection.framerPath,
     ...selection.classes,
     selection.visualType || "",
@@ -634,6 +653,8 @@ function collectSelectionPhrases(selection: SelectionPayload): string[] {
     selection.nearestFramerName || "",
     selection.textContent || "",
     ...(selection.contextTexts || []),
+    ...(selection.reactComponentStack || []),
+    ...(selection.reactSourceHints || []).filter((value) => !/\.[a-z0-9]+$/i.test(value)),
   ])
     .map((value) => value.replace(/\s+/g, " ").trim())
     .filter((value) => value.length >= 3)
@@ -654,14 +675,32 @@ function scoreFileCandidate(params: {
   const matchedTerms = new Set<string>();
   const reasons: string[] = [];
   let score = 0;
+  const normalizedFileIdentifier = normalizeHintValue(fileStem(params.filePath));
+  const normalizedContent = params.content?.toLowerCase() || null;
+  const reactHintMatches = unique([
+    ...(params.selection.reactComponentStack || []),
+    ...(params.selection.reactSourceHints || []),
+  ]).filter((hint) => {
+    const normalizedHint = normalizeHintValue(hint);
+    return (
+      Boolean(normalizedHint) &&
+      (normalizedHint.includes(normalizedFileIdentifier) ||
+        normalizedFileIdentifier.includes(normalizedHint))
+    );
+  });
 
   if (params.routeCandidates.has(params.filePath)) {
-    score += 60;
+    score += 28;
     reasons.push("matches current route");
   }
   if (params.currentFilePath && params.filePath === params.currentFilePath) {
-    score += 55;
+    score += 18;
     reasons.push("active editor file");
+  }
+  if (reactHintMatches.length) {
+    score += 110;
+    reasons.push("matches React source hint");
+    reactHintMatches.forEach((hint) => splitKeywords(hint).forEach((term) => matchedTerms.add(term)));
   }
 
   const componentEntries = params.componentIndex.components.filter(
@@ -669,8 +708,17 @@ function scoreFileCandidate(params: {
   );
   for (const entry of componentEntries) {
     if (entry.route === params.route) {
-      score += 22;
+      score += 16;
       reasons.push("component mapped to route");
+    }
+    if (
+      (params.selection.reactComponentStack || []).some((hint) =>
+        normalizeHintValue(hint).includes(normalizeHintValue(entry.name)) ||
+        normalizeHintValue(entry.name).includes(normalizeHintValue(hint)),
+      )
+    ) {
+      score += 46;
+      reasons.push("component name matches React stack");
     }
     for (const term of params.searchTerms) {
       if (entry.keywords.includes(term)) {
@@ -680,11 +728,12 @@ function scoreFileCandidate(params: {
     }
   }
 
-  if (params.content) {
-    const normalizedContent = params.content.toLowerCase();
+  if (normalizedContent) {
+    let phraseHits = 0;
     for (const phrase of params.phrases) {
       if (normalizedContent.includes(phrase.toLowerCase())) {
-        score += 30;
+        phraseHits += 1;
+        score += 34;
         reasons.push(`contains "${phrase.slice(0, 48)}"`);
       }
     }
@@ -695,32 +744,45 @@ function scoreFileCandidate(params: {
         matchedTerms.add(term);
       }
     }
+    if (phraseHits >= 2) {
+      score += 24;
+      reasons.push("matches multiple target phrases");
+    }
 
     if (
       params.selection.visualType === "chart-line" &&
-      /\b(line|stroke|chart|trend|spark)\b/i.test(params.content)
+      /\b(line|stroke|chart|trend|spark)\b/i.test(normalizedContent)
     ) {
       score += 24;
       reasons.push("contains chart line styling");
     }
     if (
       params.selection.visualType === "chart-area" &&
-      /\b(area|fill|gradient|chart)\b/i.test(params.content)
+      /\b(area|fill|gradient|chart)\b/i.test(normalizedContent)
     ) {
       score += 20;
       reasons.push("contains chart fill styling");
     }
-    if (params.selection.attributes.stroke && params.content.includes(params.selection.attributes.stroke)) {
+    if (params.selection.attributes.stroke && params.content?.includes(params.selection.attributes.stroke)) {
       score += 22;
       reasons.push("contains current stroke value");
     }
     if (
       params.selection.attributes.fill &&
       params.selection.attributes.fill !== "none" &&
-      params.content.includes(params.selection.attributes.fill)
+      params.content?.includes(params.selection.attributes.fill)
     ) {
       score += 18;
       reasons.push("contains current fill value");
+    }
+    if (
+      params.selection.instanceScope &&
+      params.selection.visualType === "chart-line" &&
+      phraseHits === 0 &&
+      params.routeCandidates.has(params.filePath)
+    ) {
+      score -= 22;
+      reasons.push("route-level file lacks selected instance anchors");
     }
   }
 
@@ -743,6 +805,12 @@ function inferConfidenceFromCandidates(
 
   let confidence = Math.min(0.98, 0.2 + top.score / 180);
   if (top.reason.includes("contains")) {
+    confidence += 0.08;
+  }
+  if (top.reason.includes("React source hint")) {
+    confidence += 0.16;
+  }
+  if (top.reason.includes("matches multiple target phrases")) {
     confidence += 0.08;
   }
   if (selection.attributes.stroke && top.reason.includes("stroke")) {

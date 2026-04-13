@@ -28,6 +28,8 @@ const selectionSchema = z
     instanceScope: z.string().nullable().optional(),
     contextTexts: z.array(z.string()).optional(),
     visualType: z.string().nullable().optional(),
+    reactComponentStack: z.array(z.string()).optional(),
+    reactSourceHints: z.array(z.string()).optional(),
     boundingBox: z.object({
       x: z.number(),
       y: z.number(),

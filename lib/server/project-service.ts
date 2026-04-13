@@ -2529,6 +2529,30 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function collectStableTargetAnchors(selectionTarget: SelectionTarget | null): string[] {
+  if (!selectionTarget) {
+    return [];
+  }
+
+  return uniqueStrings(
+    [
+      selectionTarget.label,
+      selectionTarget.componentName || "",
+      selectionTarget.sectionName || "",
+      ...(selectionTarget.payload.contextTexts || []),
+      ...(selectionTarget.payload.reactComponentStack || []),
+      ...(selectionTarget.payload.reactSourceHints || []).filter((value) => !/\.[a-z0-9]+$/i.test(value)),
+    ]
+      .map((value) => value.replace(/\s+/g, " ").trim())
+      .filter(
+        (value) =>
+          value.length >= 3 &&
+          value.length <= 80 &&
+          !/^(div|span|path|section|article|container|home)$/i.test(value),
+      ),
+  ).slice(0, 8);
+}
+
 function replaceStyleValueWithKeywords(params: {
   content: string;
   keywords: string[];
@@ -2681,6 +2705,13 @@ function validateTargetPersistence(params: {
   editPlan: EditPlan;
 }): TargetValidationResult {
   const changedPaths = params.changedFiles.map((file) => toPosixPath(file.path));
+  const targetAnchors = collectStableTargetAnchors(params.selectionTarget);
+  const anchorMatched = !targetAnchors.length
+    ? true
+    : params.changedFiles.some((file) => {
+        const normalizedContent = file.content.toLowerCase();
+        return targetAnchors.some((anchor) => normalizedContent.includes(anchor.toLowerCase()));
+      });
   const sourceMappingValid = changedPaths.every((filePath) =>
     params.editPlan.allowedFiles.includes(filePath),
   );
@@ -2717,6 +2748,7 @@ function validateTargetPersistence(params: {
       changedIntendedTarget = changedPaths.length > 0;
     }
   }
+  changedIntendedTarget = changedIntendedTarget && anchorMatched;
 
   return {
     changedIntendedTarget,
@@ -2727,6 +2759,9 @@ function validateTargetPersistence(params: {
       changedIntendedTarget
         ? "The requested target change was persisted in the planned file scope."
         : "MyMake could not prove that the intended target changed.",
+      anchorMatched
+        ? "Changed files still match the selected instance anchors."
+        : "Changed files do not match the selected instance anchors, so the edit was treated as unsafe.",
       sourceMappingValid
         ? "Changed files stayed within the resolved target scope."
         : "The edit touched files outside the resolved target scope.",

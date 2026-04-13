@@ -49,6 +49,8 @@ function createSelection(overrides?: Partial<SelectionPayload>): SelectionPayloa
     instanceScope: ".stat-card:nth-of-type(2)",
     contextTexts: ["Offshore", "Deposits", "$8.94M"],
     visualType: "chart-line",
+    reactComponentStack: ["DepositCard", "DepositsBreakdown", "App"],
+    reactSourceHints: ["DepositsBreakdown.tsx", "DepositCard", "Offshore"],
     ...overrides,
   };
 }
@@ -140,6 +142,86 @@ test("buildSelectionTarget prefers the repeated card component over the page-lev
   assert.equal(selectionTarget?.sourceFilePath, "src/app/components/StatCard.tsx");
   assert.ok((selectionTarget?.confidence || 0) >= 0.6);
   assert.equal(selectionTarget?.sourceCandidates[0]?.path, "src/app/components/StatCard.tsx");
+});
+
+test("buildSelectionTarget trusts React source hints over route-level chart guesses", async () => {
+  const projectDir = await createTempProject({
+    "src/app/components/TrendChart.tsx": `
+      export function TrendChart() {
+        return (
+          <section>
+            <h2>Trend Analysis</h2>
+            <span>Transactions</span>
+            <span>Revenue</span>
+            <span>Spendings</span>
+            <svg><path stroke="#8b949e" fill="none" /></svg>
+          </section>
+        );
+      }
+    `,
+    "src/app/components/DepositsBreakdown.tsx": `
+      export function DepositsBreakdown() {
+        return (
+          <section>
+            <h2>Deposits Breakdown</h2>
+            <article>
+              <h3>Offshore</h3>
+              <p>Deposits</p>
+              <strong>$8.94M</strong>
+              <svg><path stroke="#8b949e" fill="none" /></svg>
+            </article>
+          </section>
+        );
+      }
+    `,
+    "src/app/App.tsx": `
+      import { TrendChart } from "./components/TrendChart";
+      import { DepositsBreakdown } from "./components/DepositsBreakdown";
+      export default function App() {
+        return (
+          <>
+            <TrendChart />
+            <DepositsBreakdown />
+          </>
+        );
+      }
+    `,
+  });
+
+  const selectionTarget = await buildSelectionTarget({
+    projectDir,
+    route: "/",
+    currentFilePath: "src/app/App.tsx",
+    selection: createSelection({
+      contextTexts: ["$260.2k"],
+      reactComponentStack: ["DepositCard", "DepositsBreakdown", "App"],
+      reactSourceHints: ["DepositsBreakdown.tsx", "DepositCard", "Offshore"],
+    }),
+    componentIndex: {
+      generatedAt: new Date().toISOString(),
+      projectFingerprint: "test",
+      components: [
+        {
+          name: "Trend Chart",
+          filePath: "src/app/components/TrendChart.tsx",
+          route: "/",
+          kind: "component",
+          keywords: ["trend", "analysis", "transactions", "revenue", "spendings"],
+        },
+        {
+          name: "Deposits Breakdown",
+          filePath: "src/app/components/DepositsBreakdown.tsx",
+          route: "/",
+          kind: "component",
+          keywords: ["offshore", "deposits", "breakdown", "sparkline", "card"],
+        },
+      ],
+    } as never,
+  });
+
+  assert.ok(selectionTarget);
+  assert.equal(selectionTarget?.sourceFilePath, "src/app/components/DepositsBreakdown.tsx");
+  assert.ok((selectionTarget?.confidence || 0) >= 0.8);
 });
 
 test("buildEditPlan routes simple chart-line changes through the deterministic lane", async () => {

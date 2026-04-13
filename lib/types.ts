@@ -108,6 +108,8 @@ export interface SelectionPayload {
   instanceScope?: string | null;
   contextTexts?: string[];
   visualType?: string | null;
+  reactComponentStack?: string[];
+  reactSourceHints?: string[];
 }
 
 export interface FileNode {

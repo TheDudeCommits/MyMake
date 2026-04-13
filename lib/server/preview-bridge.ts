@@ -175,25 +175,130 @@ export function buildPreviewBridgeScript(projectId: string): string {
         }
       }
 
+      function normalizeTextValue(value) {
+        return String(value || "").replace(/\\s+/g, " ").trim();
+      }
+
+      function addUniqueTextValue(values, value, maxLength) {
+        const normalized = normalizeTextValue(value);
+        if (!normalized || normalized.length < 2 || normalized.length > (maxLength || 120)) {
+          return;
+        }
+        if (!values.includes(normalized)) {
+          values.push(normalized);
+        }
+      }
+
+      function collectTextFragments(root, limit) {
+        const values = [];
+        if (!(root instanceof Element)) {
+          return values;
+        }
+
+        addUniqueTextValue(values, root.getAttribute("aria-label"), 80);
+        addUniqueTextValue(values, root.getAttribute("title"), 80);
+        addUniqueTextValue(values, root.getAttribute("data-framer-name"), 80);
+
+        try {
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+              const normalized = normalizeTextValue(node.textContent || "");
+              return normalized.length >= 2 && normalized.length <= 80
+                ? NodeFilter.FILTER_ACCEPT
+                : NodeFilter.FILTER_REJECT;
+            },
+          });
+
+          let current = walker.nextNode();
+          while (current && values.length < (limit || 6)) {
+            addUniqueTextValue(values, current.textContent || "", 80);
+            current = walker.nextNode();
+          }
+        } catch {
+          addUniqueTextValue(values, root.textContent || "", 80);
+        }
+
+        return values;
+      }
+
+      function isChartPrimitive(element) {
+        if (!(element instanceof Element)) {
+          return false;
+        }
+
+        const tagName = element.tagName.toLowerCase();
+        if (!element.closest("svg")) {
+          return false;
+        }
+
+        return ["path", "line", "polyline", "circle", "rect", "polygon", "svg"].includes(tagName);
+      }
+
+      function normalizeSelectionElement(element) {
+        if (!(element instanceof Element) || !isChartPrimitive(element)) {
+          return element;
+        }
+
+        let best = element;
+        let bestScore = -Infinity;
+        let current = element;
+        let depth = 0;
+
+        while (current && current !== document.body && depth < 6) {
+          let score = 0;
+          const descriptor = (
+            (current.getAttribute("data-framer-name") || "") +
+            " " +
+            (typeof current.className === "string" ? current.className : "") +
+            " " +
+            current.tagName.toLowerCase()
+          ).toLowerCase();
+          const textFragments = collectTextFragments(current, 4);
+          const rect = current.getBoundingClientRect();
+
+          if (textFragments.length) {
+            score += Math.min(8, textFragments.length * 2);
+          }
+          if (/(card|chart|breakdown|overview|analysis|panel|section|widget)/.test(descriptor)) {
+            score += 6;
+          }
+          if (current.hasAttribute("data-framer-name") || current.hasAttribute("data-framer-appear-id")) {
+            score += 4;
+          }
+          if (/^(article|section|figure|li|div)$/i.test(current.tagName)) {
+            score += 3;
+          }
+          if (current.querySelector && current.querySelector("svg")) {
+            score += 2;
+          }
+          if (rect.width >= 120 && rect.height >= 36) {
+            score += 2;
+          }
+          if (depth === 0) {
+            score -= 6;
+          }
+
+          if (score > bestScore) {
+            best = current;
+            bestScore = score;
+          }
+
+          current = current.parentElement;
+          depth += 1;
+        }
+
+        return best || element;
+      }
+
       function getNearbyTextContext(element) {
         const values = [];
-        const addValue = (value) => {
-          const normalized = String(value || "").replace(/\\s+/g, " ").trim();
-          if (!normalized || normalized.length < 2 || normalized.length > 120) {
-            return;
-          }
-          if (!values.includes(normalized)) {
-            values.push(normalized);
-          }
-        };
-
-        addValue(element.textContent || "");
+        collectTextFragments(element, 6).forEach((value) => addUniqueTextValue(values, value, 80));
 
         let current = element.parentElement;
         let depth = 0;
         while (current && current !== document.body && depth < 3) {
-          addValue(current.getAttribute("data-framer-name"));
-          addValue(current.textContent || "");
+          addUniqueTextValue(values, current.getAttribute("data-framer-name"), 80);
+          collectTextFragments(current, 3).forEach((value) => addUniqueTextValue(values, value, 80));
           current = current.parentElement;
           depth += 1;
         }
@@ -204,8 +309,8 @@ export function buildPreviewBridgeScript(projectId: string): string {
             .filter((child) => child !== element)
             .slice(0, 4)
             .forEach((child) => {
-              addValue(child.getAttribute("data-framer-name"));
-              addValue(child.textContent || "");
+              addUniqueTextValue(values, child.getAttribute("data-framer-name"), 80);
+              collectTextFragments(child, 2).forEach((value) => addUniqueTextValue(values, value, 80));
             });
         }
 
@@ -254,6 +359,88 @@ export function buildPreviewBridgeScript(projectId: string): string {
           scopedSelector || "",
         ];
         return parts.filter(Boolean).join("::");
+      }
+
+      function getReactFiberNode(element) {
+        let current = element;
+        let depth = 0;
+
+        while (current && current instanceof Element && depth < 4) {
+          const keys = Object.keys(current);
+          for (const key of keys) {
+            if (key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$")) {
+              return current[key];
+            }
+          }
+          current = current.parentElement;
+          depth += 1;
+        }
+
+        return null;
+      }
+
+      function getFiberDisplayName(fiber) {
+        const type = fiber?.type || fiber?.elementType;
+        if (!type || typeof type === "string") {
+          return null;
+        }
+        return type.displayName || type.name || null;
+      }
+
+      function collectReactPropHints(props, output, limit) {
+        if (!props || typeof props !== "object") {
+          return;
+        }
+
+        const candidateKeys = ["label", "title", "subtitle", "name", "id", "metric", "section", "variant"];
+        candidateKeys.forEach((key) => {
+          const value = props[key];
+          if (typeof value === "string") {
+            addUniqueTextValue(output, value, 80);
+          } else if (Array.isArray(value)) {
+            value
+              .filter((item) => typeof item === "string")
+              .slice(0, 3)
+              .forEach((item) => addUniqueTextValue(output, item, 80));
+          }
+        });
+
+        if (output.length > (limit || 12)) {
+          output.length = limit || 12;
+        }
+      }
+
+      function getReactDebugContext(element) {
+        const componentStack = [];
+        const sourceHints = [];
+        let fiber = getReactFiberNode(element);
+        let depth = 0;
+
+        while (fiber && depth < 14) {
+          const name = getFiberDisplayName(fiber);
+          if (name && !/^(ForwardRef|Memo|Anonymous)$/.test(name)) {
+            addUniqueTextValue(componentStack, name, 80);
+            addUniqueTextValue(sourceHints, name, 80);
+          }
+
+          const debugSource = fiber?._debugSource || fiber?._debugOwner?._debugSource;
+          const fileName =
+            debugSource && typeof debugSource.fileName === "string" ? debugSource.fileName : null;
+          if (fileName) {
+            const base = fileName.split("/").pop() || fileName;
+            addUniqueTextValue(sourceHints, base, 120);
+            addUniqueTextValue(sourceHints, base.replace(/\\.[^.]+$/, ""), 120);
+          }
+
+          collectReactPropHints(fiber.memoizedProps, sourceHints, 12);
+          fiber = fiber.return;
+          depth += 1;
+        }
+
+        return {
+          componentStack: componentStack.slice(0, 8),
+          sourceHints: sourceHints.slice(0, 12),
+        };
       }
 
       function inferEditableProperties(element) {
@@ -331,48 +518,84 @@ export function buildPreviewBridgeScript(projectId: string): string {
         );
       }
 
+      function buildSelectionAttributes(rawElement, semanticElement) {
+        const attributes = attributeMap(rawElement);
+        const rawStyle = getComputedStyleSafe(rawElement);
+        const semanticStyle = rawElement === semanticElement ? rawStyle : getComputedStyleSafe(semanticElement);
+        const strokeValue =
+          rawElement.getAttribute("stroke") ||
+          rawStyle?.stroke ||
+          "";
+        const fillValue =
+          rawElement.getAttribute("fill") ||
+          rawStyle?.fill ||
+          "";
+
+        if (strokeValue && strokeValue !== "none") {
+          attributes.stroke = strokeValue;
+        }
+        if (fillValue && fillValue !== "none" && fillValue !== "rgba(0, 0, 0, 0)") {
+          attributes.fill = fillValue;
+        }
+        if (
+          semanticStyle?.backgroundColor &&
+          semanticStyle.backgroundColor !== "rgba(0, 0, 0, 0)"
+        ) {
+          attributes["background-color"] = semanticStyle.backgroundColor;
+        }
+
+        return attributes;
+      }
+
       function currentSelectionPayload(element) {
-        const rect = element.getBoundingClientRect();
-        const framerRoot = getNearestFramerRoot(element);
-        const selector = buildSelector(element, null);
+        const semanticElement = normalizeSelectionElement(element);
+        const rect = semanticElement.getBoundingClientRect();
+        const framerRoot = getNearestFramerRoot(semanticElement);
+        const selector = buildSelector(semanticElement, null);
         const scopeSelector =
           framerRoot && framerRoot instanceof Element
             ? buildSelector(framerRoot, null)
             : null;
         const scopedSelector =
-          framerRoot && framerRoot !== element
-            ? buildSelector(element, framerRoot)
+          framerRoot && framerRoot !== semanticElement
+            ? buildSelector(semanticElement, framerRoot)
             : null;
-        const contextTexts = getNearbyTextContext(element);
+        const contextTexts = getNearbyTextContext(semanticElement);
         const visualType = detectVisualType(element);
+        const reactDebug = getReactDebugContext(element);
         return {
           route: getPreviewRoute(),
           url: window.location.href,
-          domPath: buildDomPath(element),
+          domPath: buildDomPath(semanticElement),
           selector,
           scopeSelector,
           scopedSelector,
           nearestFramerName: framerRoot ? framerRoot.getAttribute("data-framer-name") : null,
-          framerPath: getFramerAncestors(element),
-          tagName: element.tagName.toLowerCase(),
-          textContent: (element.textContent || "").trim().slice(0, 600),
-          attributes: attributeMap(element),
-          classes: Array.from(element.classList),
-          outerHtml: element.outerHTML.slice(0, 5000),
-          role: element.getAttribute("role"),
-          href: element instanceof HTMLAnchorElement ? element.href : element.getAttribute("href"),
+          framerPath: getFramerAncestors(semanticElement),
+          tagName: semanticElement.tagName.toLowerCase(),
+          textContent: normalizeTextValue(semanticElement.textContent || "").slice(0, 600),
+          attributes: buildSelectionAttributes(element, semanticElement),
+          classes: Array.from(semanticElement.classList),
+          outerHtml: semanticElement.outerHTML.slice(0, 5000),
+          role: semanticElement.getAttribute("role"),
+          href:
+            semanticElement instanceof HTMLAnchorElement
+              ? semanticElement.href
+              : semanticElement.getAttribute("href"),
           src:
-            element instanceof HTMLImageElement
-              ? element.currentSrc || element.src
-              : element.getAttribute("src"),
+            semanticElement instanceof HTMLImageElement
+              ? semanticElement.currentSrc || semanticElement.src
+              : semanticElement.getAttribute("src"),
           editableProperties: inferEditableProperties(element),
-          fingerprint: buildFingerprint(element, scopeSelector, scopedSelector),
+          fingerprint: buildFingerprint(semanticElement, scopeSelector, scopedSelector) + "::" + visualType,
           instanceScope:
-            element.getAttribute("data-framer-appear-id") ||
+            semanticElement.getAttribute("data-framer-appear-id") ||
             framerRoot?.getAttribute("data-framer-appear-id") ||
             scopeSelector,
           contextTexts,
           visualType,
+          reactComponentStack: reactDebug.componentStack,
+          reactSourceHints: reactDebug.sourceHints,
           boundingBox: toBox(rect),
         };
       }
@@ -385,8 +608,8 @@ export function buildPreviewBridgeScript(projectId: string): string {
       }
 
       function selectElement(element) {
-        selectedElement = element;
-        updateOverlay(element);
+        selectedElement = normalizeSelectionElement(element);
+        updateOverlay(selectedElement);
         setPicking(false);
         emit("MYMAKE_SELECT", currentSelectionPayload(element));
       }
@@ -424,7 +647,7 @@ export function buildPreviewBridgeScript(projectId: string): string {
             return;
           }
 
-          updateOverlay(event.target);
+          updateOverlay(normalizeSelectionElement(event.target));
         },
         true,
       );
