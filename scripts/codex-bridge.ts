@@ -1,19 +1,39 @@
 import archiver from "archiver";
 import AdmZip from "adm-zip";
 import express from "express";
-import fs from "node:fs";
+import { existsSync } from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 const app = express();
 const port = Number(process.env.MYMAKE_CODEX_BRIDGE_PORT || 8766);
-const codexBin = process.env.MYMAKE_CODEX_BIN || "codex";
+const bundledCodexBin = "/Applications/Codex.app/Contents/Resources/codex";
+const codexBin =
+  process.env.MYMAKE_CODEX_BIN ||
+  (existsSync(bundledCodexBin) ? bundledCodexBin : "codex");
+const scriptPath = fileURLToPath(import.meta.url);
+const projectRoot = path.resolve(path.dirname(scriptPath), "..");
 const bridgeRoot = path.join(os.homedir(), ".mymake-codex-bridge");
 const projectsRoot = path.join(bridgeRoot, "projects");
 const statePath = path.join(bridgeRoot, "state.json");
+const configPath = path.join(bridgeRoot, "config.json");
+const launchAgentsDir = path.join(os.homedir(), "Library", "LaunchAgents");
+const launchAgentLabel = "com.mymake.codex-bridge";
+const launchAgentPath = path.join(launchAgentsDir, `${launchAgentLabel}.plist`);
+const bridgeStdoutLogPath = path.join(bridgeRoot, "codex-bridge.log");
+const bridgeStderrLogPath = path.join(bridgeRoot, "codex-bridge.error.log");
+
+type BridgeStartMode = "always-on" | "codex-app";
+
+type BridgeConfig = {
+  mode: BridgeStartMode;
+  autoStart: boolean;
+  updatedAt: string;
+};
 
 type BridgeProjectState = {
   projectId: string;
@@ -46,6 +66,16 @@ type BridgeEditRequest = {
   previousFailures?: string[];
 };
 
+type BridgeSettingsRequest = {
+  mode?: BridgeStartMode;
+  autoStart?: boolean;
+};
+
+type BridgeOpenSessionRequest = {
+  userId?: string | null;
+  projectName?: string;
+};
+
 function stateKey(projectId: string, userId?: string | null): string {
   return `${userId || "anonymous"}:${projectId}`;
 }
@@ -64,8 +94,26 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function defaultBridgeConfig(): BridgeConfig {
+  return {
+    mode: "always-on",
+    autoStart: false,
+    updatedAt: nowIso(),
+  };
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fsp.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function ensureBridgeStorage(): Promise<void> {
   await fsp.mkdir(projectsRoot, { recursive: true });
+  await fsp.mkdir(launchAgentsDir, { recursive: true });
 }
 
 async function loadState(): Promise<BridgeState> {
@@ -83,6 +131,29 @@ async function loadState(): Promise<BridgeState> {
 async function saveState(state: BridgeState): Promise<void> {
   await ensureBridgeStorage();
   await fsp.writeFile(statePath, JSON.stringify(state, null, 2), "utf8");
+}
+
+async function loadConfig(): Promise<BridgeConfig> {
+  try {
+    const raw = await fsp.readFile(configPath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<BridgeConfig>;
+    const defaults = defaultBridgeConfig();
+    return {
+      mode: parsed.mode === "codex-app" ? "codex-app" : defaults.mode,
+      autoStart: typeof parsed.autoStart === "boolean" ? parsed.autoStart : defaults.autoStart,
+      updatedAt:
+        typeof parsed.updatedAt === "string" && parsed.updatedAt.trim()
+          ? parsed.updatedAt
+          : defaults.updatedAt,
+    };
+  } catch {
+    return defaultBridgeConfig();
+  }
+}
+
+async function saveConfig(config: BridgeConfig): Promise<void> {
+  await ensureBridgeStorage();
+  await fsp.writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
 }
 
 function allowOrigin(origin: string | undefined): boolean {
@@ -110,7 +181,10 @@ app.use((req, res, next) => {
   } else {
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-MyMake-Project-Name, X-MyMake-Revision-Id, X-MyMake-User-Id");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, X-MyMake-Project-Name, X-MyMake-Revision-Id, X-MyMake-User-Id",
+  );
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
   res.setHeader("Access-Control-Allow-Private-Network", "true");
 
@@ -189,7 +263,10 @@ async function snapshotWorkspace(directory: string): Promise<Map<string, string>
   return snapshot;
 }
 
-function diffSnapshots(before: Map<string, string>, after: Map<string, string>): Array<{ path: string; reason?: string }> {
+function diffSnapshots(
+  before: Map<string, string>,
+  after: Map<string, string>,
+): Array<{ path: string; reason?: string }> {
   const changed = new Set<string>();
 
   for (const [filePath, hash] of after.entries()) {
@@ -209,11 +286,356 @@ function diffSnapshots(before: Map<string, string>, after: Map<string, string>):
     .map((filePath) => ({ path: filePath }));
 }
 
+async function runCommand(
+  command: string,
+  args: string[],
+  options?: {
+    cwd?: string;
+    allowFailure?: boolean;
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+  },
+): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options?.cwd,
+      env: options?.env || process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timeout: NodeJS.Timeout | null = null;
+
+    if (options?.timeoutMs) {
+      timeout = setTimeout(() => {
+        child.kill("SIGTERM");
+      }, options.timeoutMs);
+    }
+
+    child.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+    child.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+    child.on("error", (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+
+      if (!options?.allowFailure && code !== 0) {
+        reject(new Error(stderr.trim() || stdout.trim() || `${command} exited with ${String(code)}.`));
+        return;
+      }
+
+      resolve({ stdout, stderr, code });
+    });
+  });
+}
+
+async function isCodexAppRunning(): Promise<boolean> {
+  try {
+    const result = await runCommand(
+      "osascript",
+      ["-e", 'tell application "System Events" to (name of processes) contains "Codex"'],
+      { allowFailure: true, timeoutMs: 4000 },
+    );
+    return result.stdout.trim().toLowerCase() === "true";
+  } catch {
+    try {
+      const result = await runCommand("pgrep", ["-x", "Codex"], {
+        allowFailure: true,
+        timeoutMs: 4000,
+      });
+      return result.code === 0;
+    } catch {
+      return false;
+    }
+  }
+}
+
+async function openCodexDesktopApp(): Promise<void> {
+  await runCommand("open", ["-a", "Codex"], { timeoutMs: 5000 });
+}
+
+async function waitForCodexAppReady(timeoutMs = 12000): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await isCodexAppRunning()) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  return false;
+}
+
+async function ensureCodexAvailabilityForMode(config: BridgeConfig): Promise<void> {
+  if (config.mode !== "codex-app") {
+    return;
+  }
+
+  if (await isCodexAppRunning()) {
+    return;
+  }
+
+  await openCodexDesktopApp();
+  const ready = await waitForCodexAppReady();
+  if (!ready) {
+    throw new Error("Open Codex.app on this Mac so MyMake can use the local Codex session mode.");
+  }
+}
+
+function xmlEscape(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+async function resolveTsxCliPath(): Promise<string> {
+  const candidates = [
+    path.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+    path.join(projectRoot, "node_modules", ".bin", "tsx"),
+  ];
+
+  for (const candidate of candidates) {
+    if (await fileExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new Error("MyMake could not find the local tsx runtime needed to install the bridge agent.");
+}
+
+function buildLaunchAgentPlist(tsxCliPath: string): string {
+  const envEntries = {
+    PATH: process.env.PATH || "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+    MYMAKE_CODEX_BRIDGE_PORT: String(port),
+    MYMAKE_CODEX_BIN: codexBin,
+  };
+
+  const programArguments = [process.execPath, tsxCliPath, scriptPath]
+    .map((value) => `    <string>${xmlEscape(value)}</string>`)
+    .join("\n");
+  const environmentVariables = Object.entries(envEntries)
+    .map(
+      ([key, value]) =>
+        `      <key>${xmlEscape(key)}</key>\n      <string>${xmlEscape(value)}</string>`,
+    )
+    .join("\n");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>${xmlEscape(launchAgentLabel)}</string>
+    <key>ProgramArguments</key>
+    <array>
+${programArguments}
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${xmlEscape(projectRoot)}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${xmlEscape(bridgeStdoutLogPath)}</string>
+    <key>StandardErrorPath</key>
+    <string>${xmlEscape(bridgeStderrLogPath)}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+${environmentVariables}
+    </dict>
+  </dict>
+</plist>
+`;
+}
+
+async function getLaunchAgentStatus(): Promise<{
+  installed: boolean;
+  loaded: boolean;
+  path: string;
+}> {
+  const installed = await fileExists(launchAgentPath);
+  if (!installed) {
+    return {
+      installed: false,
+      loaded: false,
+      path: launchAgentPath,
+    };
+  }
+
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  let loaded = false;
+  if (uid !== null) {
+    const result = await runCommand(
+      "launchctl",
+      ["print", `gui/${uid}/${launchAgentLabel}`],
+      {
+        allowFailure: true,
+        timeoutMs: 5000,
+      },
+    );
+    loaded = result.code === 0;
+  }
+
+  return {
+    installed,
+    loaded,
+    path: launchAgentPath,
+  };
+}
+
+async function installLaunchAgent(): Promise<void> {
+  await ensureBridgeStorage();
+  const tsxCliPath = await resolveTsxCliPath();
+  const plist = buildLaunchAgentPlist(tsxCliPath);
+  await fsp.writeFile(launchAgentPath, plist, "utf8");
+
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid === null) {
+    return;
+  }
+
+  await runCommand("launchctl", ["bootout", `gui/${uid}`, launchAgentPath], {
+    allowFailure: true,
+    timeoutMs: 5000,
+  });
+
+  const bootstrap = await runCommand(
+    "launchctl",
+    ["bootstrap", `gui/${uid}`, launchAgentPath],
+    {
+      allowFailure: true,
+      timeoutMs: 8000,
+    },
+  );
+  if (bootstrap.code !== 0) {
+    await runCommand("launchctl", ["load", "-w", launchAgentPath], { timeoutMs: 8000 });
+  }
+
+  await runCommand("launchctl", ["kickstart", "-k", `gui/${uid}/${launchAgentLabel}`], {
+    allowFailure: true,
+    timeoutMs: 5000,
+  });
+}
+
+async function uninstallLaunchAgent(): Promise<void> {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid !== null) {
+    await runCommand("launchctl", ["bootout", `gui/${uid}`, launchAgentPath], {
+      allowFailure: true,
+      timeoutMs: 5000,
+    });
+    await runCommand("launchctl", ["unload", "-w", launchAgentPath], {
+      allowFailure: true,
+      timeoutMs: 5000,
+    });
+  }
+
+  await fsp.rm(launchAgentPath, { force: true });
+}
+
+async function normalizeAndApplyConfig(request: BridgeSettingsRequest): Promise<BridgeConfig> {
+  const current = await loadConfig();
+  const next: BridgeConfig = {
+    mode: request.mode === "codex-app" ? "codex-app" : request.mode === "always-on" ? "always-on" : current.mode,
+    autoStart:
+      typeof request.autoStart === "boolean" ? request.autoStart : current.autoStart,
+    updatedAt: nowIso(),
+  };
+
+  await saveConfig(next);
+  if (next.autoStart) {
+    await installLaunchAgent();
+  } else {
+    await uninstallLaunchAgent();
+  }
+
+  return next;
+}
+
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function appleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+async function openSessionInTerminal(params: {
+  workspaceDir: string;
+  threadId: string | null;
+}): Promise<{ resumed: boolean; command: string }> {
+  await openCodexDesktopApp().catch(() => undefined);
+
+  const command = params.threadId
+    ? `cd ${shellEscape(params.workspaceDir)} && ${shellEscape(codexBin)} resume --all --skip-git-repo-check ${shellEscape(params.threadId)}`
+    : `cd ${shellEscape(params.workspaceDir)} && ${shellEscape(codexBin)} --skip-git-repo-check`;
+
+  await runCommand(
+    "osascript",
+    [
+      "-e",
+      'tell application "Terminal" to activate',
+      "-e",
+      `tell application "Terminal" to do script ${appleScriptString(command)}`,
+    ],
+    { timeoutMs: 8000 },
+  );
+
+  return {
+    resumed: Boolean(params.threadId),
+    command,
+  };
+}
+
+async function buildHealthPayload() {
+  const config = await loadConfig();
+  const launchAgent = await getLaunchAgentStatus();
+  const codexAppRunning = await isCodexAppRunning();
+
+  return {
+    ok: true as const,
+    codexBin,
+    bridgeRoot,
+    config,
+    launchAgentInstalled: launchAgent.installed,
+    launchAgentLoaded: launchAgent.loaded,
+    launchAgentPath: launchAgent.path,
+    codexAppRunning,
+  };
+}
+
 async function runCodexTurn(params: {
   workspaceDir: string;
   prompt: string;
   threadId: string | null;
 }): Promise<{ threadId: string; summary: string; rawOutput: string[] }> {
+  const config = await loadConfig();
+  await ensureCodexAvailabilityForMode(config);
+
   const sharedArgs = [
     "--json",
     "--skip-git-repo-check",
@@ -282,11 +704,7 @@ async function runCodexTurn(params: {
     child.on("error", (error) => reject(error));
     child.on("close", (code) => {
       if (code !== 0) {
-        reject(
-          new Error(
-            stderrBuffer.trim() || `Codex exited with code ${String(code)}.`,
-          ),
-        );
+        reject(new Error(stderrBuffer.trim() || `Codex exited with code ${String(code)}.`));
         return;
       }
 
@@ -376,11 +794,7 @@ async function streamWorkspaceZip(sourceDir: string, res: express.Response): Pro
 }
 
 app.get("/health", async (_req, res) => {
-  res.json({
-    ok: true,
-    codexBin,
-    bridgeRoot,
-  });
+  res.json(await buildHealthPayload());
 });
 
 app.get("/v1/projects/:projectId/state", async (req, res) => {
@@ -391,7 +805,23 @@ app.get("/v1/projects/:projectId/state", async (req, res) => {
     projectId: req.params.projectId,
     userId,
     state: state.projects[key] || null,
+    codexAppRunning: await isCodexAppRunning(),
   });
+});
+
+app.post("/v1/settings", async (req, res) => {
+  try {
+    const request = req.body as BridgeSettingsRequest;
+    const config = await normalizeAndApplyConfig(request);
+    res.json({
+      ...(await buildHealthPayload()),
+      config,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "MyMake could not update the local Codex settings.",
+    });
+  }
 });
 
 app.put(
@@ -481,6 +911,46 @@ app.post("/v1/projects/:projectId/edit", async (req, res) => {
     summary: result.summary,
     changedFiles,
   });
+});
+
+app.post("/v1/projects/:projectId/open-session", async (req, res) => {
+  try {
+    const request = req.body as BridgeOpenSessionRequest;
+    const userId = request.userId || null;
+    const key = stateKey(req.params.projectId, userId);
+    const state = await loadState();
+    const projectState = state.projects[key];
+
+    if (!projectState) {
+      res.status(400).json({
+        error: "Sync this project into the local Codex bridge once before opening its session.",
+      });
+      return;
+    }
+
+    const config = await loadConfig();
+    await ensureCodexAvailabilityForMode(config);
+    const workspaceDir = workspaceDirFor(req.params.projectId, userId);
+    const sessionResult = await openSessionInTerminal({
+      workspaceDir,
+      threadId: projectState.threadId,
+    });
+
+    res.json({
+      ok: true,
+      projectId: req.params.projectId,
+      threadId: projectState.threadId,
+      resumed: sessionResult.resumed,
+      command: sessionResult.command,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error:
+        error instanceof Error
+          ? error.message
+          : "MyMake could not open the local Codex session for this project.",
+    });
+  }
 });
 
 app.get("/v1/projects/:projectId/export", async (req, res) => {

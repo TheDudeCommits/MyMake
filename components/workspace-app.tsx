@@ -25,6 +25,7 @@ import {
   Save,
   Search,
   SendHorizonal,
+  Settings2,
   Smartphone,
   Sparkles,
   Tablet,
@@ -108,6 +109,47 @@ type CodexBridgeEditResponse = {
   threadId: string;
   summary: string;
   changedFiles: Array<{ path: string; reason?: string }>;
+};
+
+type CodexBridgeMode = "always-on" | "codex-app";
+
+type CodexBridgeProjectStateRecord = {
+  projectId: string;
+  userId: string | null;
+  projectName: string;
+  threadId: string | null;
+  lastSyncedRevisionId: string | null;
+  updatedAt: string;
+};
+
+type CodexBridgeHealth = {
+  ok: true;
+  codexBin: string;
+  bridgeRoot: string;
+  config: {
+    mode: CodexBridgeMode;
+    autoStart: boolean;
+    updatedAt: string;
+  };
+  launchAgentInstalled: boolean;
+  launchAgentLoaded: boolean;
+  launchAgentPath: string;
+  codexAppRunning: boolean;
+};
+
+type CodexBridgeProjectStateResponse = {
+  projectId: string;
+  userId: string | null;
+  state: CodexBridgeProjectStateRecord | null;
+  codexAppRunning: boolean;
+};
+
+type CodexOpenSessionResponse = {
+  ok: true;
+  projectId: string;
+  threadId: string | null;
+  resumed: boolean;
+  command: string;
 };
 
 class RequestError extends Error {
@@ -202,6 +244,10 @@ function shortAiModelLabel(model: AiModelOption): string {
 
 function checkpointLabel(revision: RevisionRecord): string {
   return `#${String(revision.sequence + 1).padStart(2, "0")}`;
+}
+
+function codexModeLabel(mode: CodexBridgeMode): string {
+  return mode === "codex-app" ? "Only when Codex.app is open" : "Always available";
 }
 
 function selectedElementTitle(selection: SelectionPayload | null): string {
@@ -619,11 +665,13 @@ function HomeProjectCard({
 }
 
 function HomeDashboard({
+  codexBridgeReachable,
   feedback,
   error,
   filteredProjects,
   githubConnection,
   homeQuery,
+  onOpenCodexSettings,
   onImportRepo,
   onDeleteProject,
   onLogout,
@@ -635,11 +683,13 @@ function HomeDashboard({
   totalProjects,
   viewer,
 }: {
+  codexBridgeReachable: boolean;
   feedback: string | null;
   error: string | null;
   filteredProjects: ProjectRecord[];
   githubConnection: GitHubConnectionRecord;
   homeQuery: string;
+  onOpenCodexSettings: () => void;
   onImportRepo: () => void;
   onDeleteProject: (project: ProjectRecord) => void;
   onLogout: () => void;
@@ -725,6 +775,19 @@ function HomeDashboard({
 
         <section className="min-w-0 overflow-y-auto px-7 pb-8 pt-4">
           <div className="flex items-center justify-end gap-3">
+            <button
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-[12px] border border-white/[0.08] bg-[#2f3034] px-4 text-sm font-medium text-white transition hover:bg-[#34363b]"
+              type="button"
+              title={
+                codexBridgeReachable
+                  ? "Adjust local Codex bridge settings"
+                  : "Open Codex bridge settings"
+              }
+              onClick={onOpenCodexSettings}
+            >
+              <Settings2 className="h-4 w-4" />
+              Codex settings
+            </button>
             <button
               className="inline-flex h-10 items-center justify-center gap-2 rounded-[12px] border border-white/[0.08] bg-[#2f3034] px-4 text-sm font-medium text-white transition hover:bg-[#34363b]"
               type="button"
@@ -1004,6 +1067,179 @@ function GitHubModal({
   );
 }
 
+function CodexSettingsModal({
+  bridgeHealth,
+  draftAutoStart,
+  draftMode,
+  isReachable,
+  isSaving,
+  onAutoStartChange,
+  onClose,
+  onModeChange,
+  onSave,
+}: {
+  bridgeHealth: CodexBridgeHealth | null;
+  draftAutoStart: boolean;
+  draftMode: CodexBridgeMode;
+  isReachable: boolean;
+  isSaving: boolean;
+  onAutoStartChange: (value: boolean) => void;
+  onClose: () => void;
+  onModeChange: (value: CodexBridgeMode) => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[95] grid place-items-center bg-black/55 px-4 py-8 backdrop-blur-sm">
+      <div className="w-full max-w-[640px] rounded-[28px] border border-white/[0.08] bg-[#242528] p-5 shadow-[0_30px_90px_rgba(0,0,0,0.42)]">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-lg font-medium text-white">Codex bridge settings</p>
+            <p className="mt-1 text-sm leading-6 text-slate-400">
+              Control how MyMake keeps the local Codex bridge available on this Mac.
+            </p>
+          </div>
+          <button
+            className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-white/[0.04] hover:text-white"
+            type="button"
+            onClick={onClose}
+          >
+            ✕
+          </button>
+        </div>
+
+        {isReachable && bridgeHealth ? (
+          <>
+            <div className="mt-5 grid gap-3 md:grid-cols-3">
+              <div className="rounded-[18px] border border-white/[0.08] bg-[#2c2d31] px-4 py-3">
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Bridge</p>
+                <p className="mt-2 text-sm font-medium text-white">Reachable</p>
+                <p className="mt-1 text-xs leading-5 text-slate-400">
+                  Local endpoint is responding on <span className="text-slate-300">127.0.0.1:8766</span>.
+                </p>
+              </div>
+              <div className="rounded-[18px] border border-white/[0.08] bg-[#2c2d31] px-4 py-3">
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Launch at login</p>
+                <p className="mt-2 text-sm font-medium text-white">
+                  {bridgeHealth.launchAgentInstalled ? "Installed" : "Manual only"}
+                </p>
+                <p className="mt-1 text-xs leading-5 text-slate-400">
+                  {bridgeHealth.launchAgentInstalled
+                    ? bridgeHealth.launchAgentLoaded
+                      ? "launchd will keep the local bridge ready in the background."
+                      : "The launch agent exists but is not loaded right now."
+                    : "MyMake will only reach Codex when you start the bridge manually."}
+                </p>
+              </div>
+              <div className="rounded-[18px] border border-white/[0.08] bg-[#2c2d31] px-4 py-3">
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Codex.app</p>
+                <p className="mt-2 text-sm font-medium text-white">
+                  {bridgeHealth.codexAppRunning ? "Open" : "Closed"}
+                </p>
+                <p className="mt-1 text-xs leading-5 text-slate-400">
+                  {bridgeHealth.config.mode === "codex-app"
+                    ? "This mode keeps Codex tied to the desktop app state."
+                    : "Always-on mode can keep Codex edits available even when the desktop app is closed."}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-5 rounded-[20px] border border-white/[0.08] bg-[#2c2d31] p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm font-medium text-white">Start automatically at login</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-400">
+                    Install a lightweight macOS launchd agent so the bridge is already there when MyMake needs it.
+                  </p>
+                </div>
+                <button
+                  className={clsx(
+                    "relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition",
+                    draftAutoStart ? "bg-[#5f62ff]" : "bg-white/[0.12]",
+                  )}
+                  type="button"
+                  onClick={() => onAutoStartChange(!draftAutoStart)}
+                >
+                  <span
+                    className={clsx(
+                      "ml-1 block h-5 w-5 rounded-full bg-white transition",
+                      draftAutoStart && "translate-x-5",
+                    )}
+                  />
+                </button>
+              </div>
+
+              <div className="mt-5">
+                <p className="text-sm font-medium text-white">Local Codex session behavior</p>
+                <p className="mt-1 text-xs leading-5 text-slate-400">
+                  Choose whether MyMake keeps Codex ready all the time or only when the Codex desktop app is open.
+                </p>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  {([
+                    {
+                      value: "always-on",
+                      title: "Always available",
+                      description:
+                        "Recommended. MyMake can hand work to the local Codex session immediately.",
+                    },
+                    {
+                      value: "codex-app",
+                      title: "Only when Codex.app is open",
+                      description:
+                        "More explicit. MyMake will require and open Codex.app before local Codex work starts.",
+                    },
+                  ] as const).map((option) => (
+                    <button
+                      key={option.value}
+                      className={clsx(
+                        "rounded-[16px] border px-4 py-4 text-left transition",
+                        draftMode === option.value
+                          ? "border-[#5f62ff]/45 bg-[#5f62ff]/10 text-white"
+                          : "border-white/[0.08] bg-[#26272b] text-slate-300 hover:border-white/[0.14] hover:bg-[#2b2c31]",
+                      )}
+                      type="button"
+                      onClick={() => onModeChange(option.value)}
+                    >
+                      <p className="text-sm font-medium">{option.title}</p>
+                      <p className="mt-2 text-xs leading-5 text-slate-400">{option.description}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-5 flex items-center justify-between gap-3 rounded-[18px] border border-white/[0.08] bg-[#2c2d31] px-4 py-3 text-xs leading-5 text-slate-400">
+              <div>
+                <p>
+                  Current mode: <span className="text-slate-200">{codexModeLabel(bridgeHealth.config.mode)}</span>
+                </p>
+                <p className="mt-1">
+                  Launch agent path: <span className="text-slate-300">{bridgeHealth.launchAgentPath}</span>
+                </p>
+              </div>
+              <button
+                className="inline-flex h-10 items-center gap-2 rounded-[12px] bg-[#5f62ff] px-4 text-sm font-medium text-white transition hover:bg-[#6b6eff] disabled:cursor-not-allowed disabled:opacity-50"
+                type="button"
+                disabled={isSaving}
+                onClick={onSave}
+              >
+                {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Settings2 className="h-4 w-4" />}
+                Save settings
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="mt-5 rounded-[20px] border border-amber-300/18 bg-amber-300/10 px-4 py-4 text-sm leading-7 text-amber-100">
+            MyMake could not reach the local Codex bridge yet. Start it once with{" "}
+            <span className="font-semibold text-white">npm run codex-bridge</span> from{" "}
+            <span className="font-semibold text-white">/Users/amir/Downloads/MyMake</span>, then reopen
+            this panel to enable login-at-startup and session mode controls.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSnapshot }) {
   const { logout } = usePrivy();
   const [snapshot, setSnapshot] = useState(initialSnapshot);
@@ -1032,10 +1268,12 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const [homeQuery, setHomeQuery] = useState("");
   const [isShareMenuOpen, setIsShareMenuOpen] = useState(false);
   const [isGitHubModalOpen, setIsGitHubModalOpen] = useState(false);
+  const [isCodexSettingsOpen, setIsCodexSettingsOpen] = useState(false);
   const [gitHubModalMode, setGitHubModalMode] = useState<"import" | "connect">("import");
   const [gitHubRepos, setGitHubRepos] = useState<GitHubRepoSummary[]>([]);
   const [isGitHubReposLoading, setIsGitHubReposLoading] = useState(false);
   const [isGitHubSubmitting, setIsGitHubSubmitting] = useState(false);
+  const [isCodexSettingsSaving, setIsCodexSettingsSaving] = useState(false);
   const [newGitHubRepoName, setNewGitHubRepoName] = useState("");
   const [newGitHubRepoPrivate, setNewGitHubRepoPrivate] = useState(true);
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([]);
@@ -1048,6 +1286,12 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const [isPreviewFrameReady, setIsPreviewFrameReady] = useState(false);
   const [isPreviewSlow, setIsPreviewSlow] = useState(false);
   const [previewNonce, setPreviewNonce] = useState(0);
+  const [codexBridgeHealth, setCodexBridgeHealth] = useState<CodexBridgeHealth | null>(null);
+  const [codexBridgeProjectState, setCodexBridgeProjectState] =
+    useState<CodexBridgeProjectStateRecord | null>(null);
+  const [codexBridgeDraftMode, setCodexBridgeDraftMode] =
+    useState<CodexBridgeMode>("always-on");
+  const [codexBridgeDraftAutoStart, setCodexBridgeDraftAutoStart] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const leftRailScrollRef = useRef<HTMLDivElement>(null);
@@ -1056,6 +1300,13 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const shareMenuRef = useRef<HTMLDivElement>(null);
   const previousPreviewIdentityRef = useRef<string | null>(null);
   const previousRevisionIdRef = useRef<string | null>(null);
+  const didHydrateCodexBridgeSettingsRef = useRef(false);
+  const refreshCodexBridgeHealthRef =
+    useRef<(options?: { silent?: boolean }) => Promise<CodexBridgeHealth | null>>();
+  const refreshCodexProjectStateRef =
+    useRef<
+      (projectId: string | null | undefined) => Promise<CodexBridgeProjectStateRecord | null>
+    >();
 
   const currentProject = snapshot.currentProject;
   const viewer = snapshot.viewer;
@@ -1105,6 +1356,11 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       null,
     [fallbackAiModelKey, selectedAiModelKey, snapshot.aiModels],
   );
+  const isCodexBridgeReachable = Boolean(codexBridgeHealth?.ok);
+  const currentCodexThreadId = codexBridgeProjectState?.threadId || null;
+  const codexModeSummary = codexBridgeHealth
+    ? `${codexModeLabel(codexBridgeHealth.config.mode)}${codexBridgeHealth.config.autoStart ? " · starts at login" : ""}`
+    : null;
   const editableFiles = useMemo(
     () =>
       currentProject
@@ -1175,6 +1431,22 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     window.localStorage.setItem(AI_MODEL_STORAGE_KEY, selectedAiModelKey);
   }, [selectedAiModelKey]);
+
+  useEffect(() => {
+    void refreshCodexBridgeHealthRef.current?.({ silent: true });
+  }, []);
+
+  useEffect(() => {
+    if (!isCodexSettingsOpen) {
+      return;
+    }
+
+    void refreshCodexBridgeHealthRef.current?.({ silent: true });
+  }, [isCodexSettingsOpen]);
+
+  useEffect(() => {
+    void refreshCodexProjectStateRef.current?.(currentProject?.project.id);
+  }, [currentProject?.project.id, viewer?.id]);
 
   useEffect(() => {
     setEditorFilePath(currentProject?.currentFilePath || null);
@@ -1448,12 +1720,60 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     return payload;
   }
 
-  async function ensureCodexBridgeAvailable() {
+  async function refreshCodexBridgeHealth(options?: { silent?: boolean }) {
     try {
       const response = await fetch(`${CODEX_BRIDGE_ORIGIN}/health`, {
         cache: "no-store",
       });
-      await readBridgeJson<{ ok: boolean }>(response);
+      const payload = await readBridgeJson<CodexBridgeHealth>(response);
+      setCodexBridgeHealth(payload);
+      if (!didHydrateCodexBridgeSettingsRef.current || isCodexSettingsOpen) {
+        setCodexBridgeDraftMode(payload.config.mode);
+        setCodexBridgeDraftAutoStart(payload.config.autoStart);
+        didHydrateCodexBridgeSettingsRef.current = true;
+      }
+      return payload;
+    } catch (caughtError) {
+      setCodexBridgeHealth(null);
+      if (!options?.silent) {
+        throw caughtError;
+      }
+      return null;
+    }
+  }
+
+  async function refreshCodexProjectState(projectId: string | null | undefined) {
+    if (!projectId) {
+      setCodexBridgeProjectState(null);
+      return null;
+    }
+
+    try {
+      const url = new URL(`${CODEX_BRIDGE_ORIGIN}/v1/projects/${projectId}/state`);
+      if (viewer?.id) {
+        url.searchParams.set("userId", viewer.id);
+      }
+      const response = await fetch(url.toString(), {
+        cache: "no-store",
+      });
+      const payload = await readBridgeJson<CodexBridgeProjectStateResponse>(response);
+      setCodexBridgeProjectState(payload.state);
+      return payload.state;
+    } catch {
+      setCodexBridgeProjectState(null);
+      return null;
+    }
+  }
+
+  refreshCodexBridgeHealthRef.current = refreshCodexBridgeHealth;
+  refreshCodexProjectStateRef.current = refreshCodexProjectState;
+
+  async function ensureCodexBridgeAvailable() {
+    try {
+      const payload = await refreshCodexBridgeHealth();
+      if (!payload?.ok) {
+        throw new Error("Bridge health check failed.");
+      }
     } catch {
       throw new RequestError(
         "MyMake could not reach the local Codex bridge. Start it on this Mac with `npm run codex-bridge` from /Users/amir/Downloads/MyMake.",
@@ -1487,6 +1807,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       body: zipBlob,
     });
     await readBridgeJson<{ ok: boolean }>(syncResponse);
+    await refreshCodexProjectState(projectId);
   }
 
   async function runCodexBridgeTurn(projectId: string, previousFailures: string[]) {
@@ -1585,6 +1906,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           bridgeResult,
         );
         applySnapshot(snapshotResponse);
+        await refreshCodexProjectState(currentProject.project.id);
         setPrompt("");
         return;
       } catch (caughtError) {
@@ -1606,6 +1928,89 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       : new Error("Codex bridge could not land the edit.");
   }
 
+  async function handleSaveCodexBridgeSettings() {
+    setIsCodexSettingsSaving(true);
+    setError(null);
+
+    try {
+      await ensureCodexBridgeAvailable();
+      const response = await fetch(`${CODEX_BRIDGE_ORIGIN}/v1/settings`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mode: codexBridgeDraftMode,
+          autoStart: codexBridgeDraftAutoStart,
+        }),
+      });
+      const payload = await readBridgeJson<CodexBridgeHealth>(response);
+      setCodexBridgeHealth(payload);
+      setCodexBridgeDraftMode(payload.config.mode);
+      setCodexBridgeDraftAutoStart(payload.config.autoStart);
+      setFeedback(
+        payload.config.autoStart
+          ? `Codex bridge settings saved. ${codexModeLabel(payload.config.mode)} and launch-at-login is enabled.`
+          : `Codex bridge settings saved. ${codexModeLabel(payload.config.mode)} and launch-at-login is disabled.`,
+      );
+      setIsCodexSettingsOpen(false);
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "MyMake could not save the local Codex bridge settings.",
+      );
+    } finally {
+      setIsCodexSettingsSaving(false);
+    }
+  }
+
+  async function handleOpenCodexSession() {
+    if (!currentProject?.project.currentRevisionId) {
+      return;
+    }
+
+    setError(null);
+    clearComposerDiagnostics();
+
+    try {
+      setFeedback("Preparing the project workspace for its local Codex session...");
+      await ensureCodexBridgeAvailable();
+      await syncCodexBridgeWorkspace(
+        currentProject.project.id,
+        currentProject.project.currentRevisionId,
+      );
+
+      const response = await fetch(
+        `${CODEX_BRIDGE_ORIGIN}/v1/projects/${currentProject.project.id}/open-session`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            userId: viewer?.id || null,
+            projectName: currentProject.project.name,
+          }),
+        },
+      );
+      const payload = await readBridgeJson<CodexOpenSessionResponse>(response);
+      await refreshCodexBridgeHealth({ silent: true });
+      await refreshCodexProjectState(currentProject.project.id);
+      setFeedback(
+        payload.resumed
+          ? "Opened this project's existing Codex session in Terminal."
+          : "Opened a new interactive Codex session for this project in Terminal.",
+      );
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "MyMake could not open the local Codex session.",
+      );
+    }
+  }
+
   function syncBrowserLocation(projectId: string | null) {
     if (typeof window === "undefined") {
       return;
@@ -1622,6 +2027,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     syncBrowserLocation(nextSnapshot.currentProjectId);
     setError(null);
     clearComposerDiagnostics();
+    void refreshCodexProjectState(nextSnapshot.currentProjectId);
     if (nextSnapshot.feedback) {
       setFeedback(nextSnapshot.feedback);
     } else if (nextSnapshot.ai?.summary) {
@@ -2213,11 +2619,13 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     return (
       <>
         <HomeDashboard
+          codexBridgeReachable={isCodexBridgeReachable}
           feedback={feedback}
           error={error}
           filteredProjects={filteredProjects}
           githubConnection={githubConnection}
           homeQuery={homeQuery}
+          onOpenCodexSettings={() => setIsCodexSettingsOpen(true)}
           onImportRepo={() =>
             githubConnection.connected
               ? openGitHubModal("import")
@@ -2251,6 +2659,19 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
             onRepoConnect={(repo) => void handleConnectProjectRepo(repo)}
             onSetMode={setGitHubModalMode}
             repos={gitHubRepos}
+          />
+        ) : null}
+        {isCodexSettingsOpen ? (
+          <CodexSettingsModal
+            bridgeHealth={codexBridgeHealth}
+            draftAutoStart={codexBridgeDraftAutoStart}
+            draftMode={codexBridgeDraftMode}
+            isReachable={isCodexBridgeReachable}
+            isSaving={isCodexSettingsSaving}
+            onAutoStartChange={setCodexBridgeDraftAutoStart}
+            onClose={() => setIsCodexSettingsOpen(false)}
+            onModeChange={setCodexBridgeDraftMode}
+            onSave={() => void handleSaveCodexBridgeSettings()}
           />
         ) : null}
         {sharedInputs}
@@ -2336,6 +2757,18 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
             <div className="ml-auto flex items-center gap-2">
               <ToolbarIconButton
                 label={
+                  currentCodexThreadId
+                    ? "Open this project's Codex session"
+                    : "Open a Codex session for this project"
+                }
+                active={Boolean(currentCodexThreadId)}
+                disabled={!currentProject}
+                onClick={() => void handleOpenCodexSession()}
+              >
+                <ExternalLink className="h-4 w-4" />
+              </ToolbarIconButton>
+              <ToolbarIconButton
+                label={
                   githubBinding
                     ? `Push ${currentCheckpointLabel} to ${githubBinding.owner}/${githubBinding.repo}`
                     : "Connect this project to GitHub"
@@ -2404,6 +2837,12 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   </div>
                 ) : null}
               </div>
+              <ToolbarIconButton
+                label="Open Codex settings"
+                onClick={() => setIsCodexSettingsOpen(true)}
+              >
+                <Settings2 className="h-4 w-4" />
+              </ToolbarIconButton>
               <UserBadgeButton
                 onClick={() => void handleLogout()}
                 label={viewer?.displayName || viewer?.email || "A"}
@@ -2801,8 +3240,32 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
               <div className="rounded-[18px] border border-white/[0.08] bg-[#2d2d2f] p-2.5">
                 {selectedAiModel?.key === "openai-codex" ? (
                   <div className="mb-2 rounded-[12px] border border-[#7f82ff]/20 bg-[#22232b] px-3 py-2 text-[11px] leading-5 text-slate-300">
-                    Codex mode runs locally on this Mac through the MyMake bridge. If it is not
-                    running yet, start it with <span className="font-semibold text-white">npm run codex-bridge</span>.
+                    {isCodexBridgeReachable ? (
+                      <>
+                        Codex mode is connected locally on this Mac.{" "}
+                        <span className="font-semibold text-white">
+                          {codexModeSummary || "Always available"}
+                        </span>
+                        {currentCodexThreadId ? (
+                          <>
+                            {" "}
+                            · Session ready for this project.
+                          </>
+                        ) : (
+                          <>
+                            {" "}
+                            · MyMake will create or resume the project session automatically on the
+                            next Codex run.
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        Codex mode runs locally on this Mac through the MyMake bridge. If it is not
+                        running yet, start it with{" "}
+                        <span className="font-semibold text-white">npm run codex-bridge</span>.
+                      </>
+                    )}
                   </div>
                 ) : null}
                 <textarea
@@ -3123,6 +3586,19 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           onRepoConnect={(repo) => void handleConnectProjectRepo(repo)}
           onSetMode={setGitHubModalMode}
           repos={gitHubRepos}
+        />
+      ) : null}
+      {isCodexSettingsOpen ? (
+        <CodexSettingsModal
+          bridgeHealth={codexBridgeHealth}
+          draftAutoStart={codexBridgeDraftAutoStart}
+          draftMode={codexBridgeDraftMode}
+          isReachable={isCodexBridgeReachable}
+          isSaving={isCodexSettingsSaving}
+          onAutoStartChange={setCodexBridgeDraftAutoStart}
+          onClose={() => setIsCodexSettingsOpen(false)}
+          onModeChange={setCodexBridgeDraftMode}
+          onSave={() => void handleSaveCodexBridgeSettings()}
         />
       ) : null}
       {sharedInputs}
