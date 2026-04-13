@@ -1,10 +1,14 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 
+import {
+  collectProcessedAttachmentImages,
+  formatProcessedAttachmentsForPrompt,
+  type ProcessedAttachment,
+} from "@/lib/server/attachment-manager";
 import { getEnv } from "@/lib/server/env";
 import type {
   AiChangedFile,
-  AnthropicAttachment,
   EditMode,
   EditPlan,
   SelectionPayload,
@@ -292,10 +296,14 @@ function buildCommonContentBlocks(params: {
   selectionTarget: SelectionTarget | null;
   editPlan: EditPlan;
   contextFiles: ContextFile[];
-  attachments: AnthropicAttachment[];
+  attachments: ProcessedAttachment[];
   currentFilePath?: string;
   allowedPaths?: string[];
   contextSummary?: string | null;
+  guidelinesText?: string | null;
+  projectMemoryText?: string | null;
+  conversationHistoryText?: string | null;
+  currentStateText?: string | null;
   activeKitSummaries?: string[];
 }): Anthropic.Messages.ContentBlockParam[] {
   const contentBlocks: Anthropic.Messages.ContentBlockParam[] = [
@@ -303,6 +311,12 @@ function buildCommonContentBlocks(params: {
       type: "text",
       text: [
         `User prompt: ${params.prompt}`,
+        ...(params.guidelinesText ? [`Design system guidelines:\n${params.guidelinesText}`] : []),
+        ...(params.projectMemoryText ? [`Project memory:\n${params.projectMemoryText}`] : []),
+        ...(params.currentStateText ? [`Current design state:\n${params.currentStateText}`] : []),
+        ...(params.conversationHistoryText
+          ? [`Managed conversation history:\n${params.conversationHistoryText}`]
+          : []),
         `Edit mode: ${params.editMode}`,
         `Edit plan: ${JSON.stringify(params.editPlan, null, 2)}`,
         `Selected element: ${
@@ -331,7 +345,15 @@ function buildCommonContentBlocks(params: {
     },
   ];
 
-  for (const attachment of params.attachments) {
+  const attachmentPrompt = formatProcessedAttachmentsForPrompt(params.attachments);
+  if (attachmentPrompt) {
+    contentBlocks.push({
+      type: "text",
+      text: attachmentPrompt,
+    });
+  }
+
+  for (const attachment of collectProcessedAttachmentImages(params.attachments)) {
     if (attachment.mimeType.startsWith("image/")) {
       contentBlocks.push({
         type: "image",
@@ -345,18 +367,7 @@ function buildCommonContentBlocks(params: {
           data: attachment.data.toString("base64"),
         },
       });
-      contentBlocks.push({
-        type: "text",
-        text: `Image attachment: ${attachment.filename}`,
-      });
-      continue;
     }
-
-    const decodedText = attachment.data.toString("utf8");
-    contentBlocks.push({
-      type: "text",
-      text: `Attachment ${attachment.filename} (${attachment.mimeType}):\n${decodedText.slice(0, 12_000)}`,
-    });
   }
 
   return contentBlocks;
@@ -372,8 +383,12 @@ export async function requestAiEdit(params: {
   currentFilePath?: string;
   contextFiles: ContextFile[];
   contextSummary?: string | null;
+  guidelinesText?: string | null;
+  projectMemoryText?: string | null;
+  conversationHistoryText?: string | null;
+  currentStateText?: string | null;
   activeKitSummaries?: string[];
-  attachments: AnthropicAttachment[];
+  attachments: ProcessedAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
@@ -394,6 +409,7 @@ export async function requestAiEdit(params: {
     "Preserve existing file paths and module wiring by default.",
     "Keep Tailwind and existing styling conventions intact unless the prompt explicitly asks for a larger redesign.",
     "Treat the provided edit plan and semantic target as hard constraints unless the prompt explicitly broadens the scope.",
+    "Read the provided design system guidelines, project memory, managed conversation history, and current state summary before making changes.",
     ...(isStaticOverrideContext(params) ? staticOverrideInstructions() : []),
   ].join("\n");
 
@@ -433,8 +449,12 @@ export async function requestAnthropicPatchEdit(params: {
   currentFilePath: string;
   contextFiles: ContextFile[];
   contextSummary?: string | null;
+  guidelinesText?: string | null;
+  projectMemoryText?: string | null;
+  conversationHistoryText?: string | null;
+  currentStateText?: string | null;
   activeKitSummaries?: string[];
-  attachments: AnthropicAttachment[];
+  attachments: ProcessedAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
@@ -458,6 +478,7 @@ export async function requestAnthropicPatchEdit(params: {
     "Use an empty string in replace to remove content.",
     "Prefer 1-3 targeted operations.",
     "Honor the provided edit plan and semantic target when choosing search/replace operations.",
+    "Read the provided design system guidelines, project memory, managed conversation history, and current state summary before deciding the patch.",
   ].join("\n");
 
   const response = await client.messages.create({

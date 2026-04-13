@@ -1,7 +1,7 @@
+import type { ProcessedAttachment } from "@/lib/server/attachment-manager";
 import type {
   AiModelKey,
   AiModelOption,
-  AnthropicAttachment,
   EditMode,
   EditPlan,
   SelectionPayload,
@@ -92,8 +92,12 @@ export async function requestAiEdit(params: {
   currentFilePath?: string | null;
   contextFiles: ContextFile[];
   contextSummary?: string | null;
+  guidelinesText?: string | null;
+  projectMemoryText?: string | null;
+  conversationHistoryText?: string | null;
+  currentStateText?: string | null;
   activeKitSummaries?: string[];
-  attachments: AnthropicAttachment[];
+  attachments: ProcessedAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
@@ -113,6 +117,10 @@ export async function requestAiEdit(params: {
       currentFilePath: params.currentFilePath || undefined,
       contextFiles: params.contextFiles,
       contextSummary: params.contextSummary,
+      guidelinesText: params.guidelinesText,
+      projectMemoryText: params.projectMemoryText,
+      conversationHistoryText: params.conversationHistoryText,
+      currentStateText: params.currentStateText,
       activeKitSummaries: params.activeKitSummaries,
       attachments: params.attachments,
     });
@@ -128,6 +136,10 @@ export async function requestAiEdit(params: {
     currentFilePath: params.currentFilePath || undefined,
     contextFiles: params.contextFiles,
     contextSummary: params.contextSummary,
+    guidelinesText: params.guidelinesText,
+    projectMemoryText: params.projectMemoryText,
+    conversationHistoryText: params.conversationHistoryText,
+    currentStateText: params.currentStateText,
     activeKitSummaries: params.activeKitSummaries,
     attachments: params.attachments,
   });
@@ -143,8 +155,12 @@ export async function requestAiPatchEdit(params: {
   currentFilePath: string;
   contextFiles: ContextFile[];
   contextSummary?: string | null;
+  guidelinesText?: string | null;
+  projectMemoryText?: string | null;
+  conversationHistoryText?: string | null;
+  currentStateText?: string | null;
   activeKitSummaries?: string[];
-  attachments: AnthropicAttachment[];
+  attachments: ProcessedAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
@@ -164,6 +180,10 @@ export async function requestAiPatchEdit(params: {
       currentFilePath: params.currentFilePath,
       contextFiles: params.contextFiles,
       contextSummary: params.contextSummary,
+      guidelinesText: params.guidelinesText,
+      projectMemoryText: params.projectMemoryText,
+      conversationHistoryText: params.conversationHistoryText,
+      currentStateText: params.currentStateText,
       activeKitSummaries: params.activeKitSummaries,
       attachments: params.attachments,
     });
@@ -179,6 +199,10 @@ export async function requestAiPatchEdit(params: {
     currentFilePath: params.currentFilePath,
     contextFiles: params.contextFiles,
     contextSummary: params.contextSummary,
+    guidelinesText: params.guidelinesText,
+    projectMemoryText: params.projectMemoryText,
+    conversationHistoryText: params.conversationHistoryText,
+    currentStateText: params.currentStateText,
     activeKitSummaries: params.activeKitSummaries,
     attachments: params.attachments,
   });

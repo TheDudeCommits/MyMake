@@ -1,10 +1,14 @@
 import OpenAI from "openai";
 import { z } from "zod";
 
+import {
+  collectProcessedAttachmentImages,
+  formatProcessedAttachmentsForPrompt,
+  type ProcessedAttachment,
+} from "@/lib/server/attachment-manager";
 import { getEnv } from "@/lib/server/env";
 import type {
   AiChangedFile,
-  AnthropicAttachment,
   EditMode,
   EditPlan,
   SelectionPayload,
@@ -192,9 +196,13 @@ function buildCommonContent(params: {
   selectionTarget: SelectionTarget | null;
   editPlan: EditPlan;
   contextFiles: ContextFile[];
-  attachments: AnthropicAttachment[];
+  attachments: ProcessedAttachment[];
   currentFilePath?: string;
   contextSummary?: string | null;
+  guidelinesText?: string | null;
+  projectMemoryText?: string | null;
+  conversationHistoryText?: string | null;
+  currentStateText?: string | null;
   activeKitSummaries?: string[];
 }) {
   const content: Array<
@@ -205,6 +213,12 @@ function buildCommonContent(params: {
       type: "text",
       text: [
         `User prompt: ${params.prompt}`,
+        ...(params.guidelinesText ? [`Design system guidelines:\n${params.guidelinesText}`] : []),
+        ...(params.projectMemoryText ? [`Project memory:\n${params.projectMemoryText}`] : []),
+        ...(params.currentStateText ? [`Current design state:\n${params.currentStateText}`] : []),
+        ...(params.conversationHistoryText
+          ? [`Managed conversation history:\n${params.conversationHistoryText}`]
+          : []),
         `Edit mode: ${params.editMode}`,
         `Edit plan: ${JSON.stringify(params.editPlan, null, 2)}`,
         `Selected element: ${
@@ -230,7 +244,15 @@ function buildCommonContent(params: {
     },
   ];
 
-  for (const attachment of params.attachments) {
+  const attachmentPrompt = formatProcessedAttachmentsForPrompt(params.attachments);
+  if (attachmentPrompt) {
+    content.push({
+      type: "text",
+      text: attachmentPrompt,
+    });
+  }
+
+  for (const attachment of collectProcessedAttachmentImages(params.attachments)) {
     if (attachment.mimeType.startsWith("image/")) {
       content.push({
         type: "image_url",
@@ -238,17 +260,7 @@ function buildCommonContent(params: {
           url: `data:${attachment.mimeType};base64,${attachment.data.toString("base64")}`,
         },
       });
-      content.push({
-        type: "text",
-        text: `Image attachment: ${attachment.filename}`,
-      });
-      continue;
     }
-
-    content.push({
-      type: "text",
-      text: `Attachment ${attachment.filename} (${attachment.mimeType}):\n${attachment.data.toString("utf8").slice(0, 12_000)}`,
-    });
   }
 
   return content;
@@ -264,8 +276,12 @@ export async function requestOpenAiEdit(params: {
   currentFilePath?: string;
   contextFiles: ContextFile[];
   contextSummary?: string | null;
+  guidelinesText?: string | null;
+  projectMemoryText?: string | null;
+  conversationHistoryText?: string | null;
+  currentStateText?: string | null;
   activeKitSummaries?: string[];
-  attachments: AnthropicAttachment[];
+  attachments: ProcessedAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
@@ -284,6 +300,7 @@ export async function requestOpenAiEdit(params: {
     "Preserve existing file paths and module wiring by default.",
     "Keep Tailwind and existing styling conventions intact unless the prompt explicitly asks for a larger redesign.",
     "Treat the provided edit plan and semantic target as hard constraints unless the prompt explicitly broadens the scope.",
+    "Read the provided design system guidelines, project memory, managed conversation history, and current state summary before making changes.",
     ...(isStaticOverrideContext(params) ? staticOverrideInstructions() : []),
   ].join("\n");
 
@@ -333,8 +350,12 @@ export async function requestOpenAiPatchEdit(params: {
   currentFilePath: string;
   contextFiles: ContextFile[];
   contextSummary?: string | null;
+  guidelinesText?: string | null;
+  projectMemoryText?: string | null;
+  conversationHistoryText?: string | null;
+  currentStateText?: string | null;
   activeKitSummaries?: string[];
-  attachments: AnthropicAttachment[];
+  attachments: ProcessedAttachment[];
 }): Promise<{
   summary: string;
   warnings: string[];
@@ -356,6 +377,7 @@ export async function requestOpenAiPatchEdit(params: {
     "Prefer 1-3 targeted operations.",
     "Use an empty string in replace when the user wants content removed.",
     "Honor the provided edit plan and semantic target when choosing search/replace operations.",
+    "Read the provided design system guidelines, project memory, managed conversation history, and current state summary before deciding the patch.",
   ].join("\n");
 
   const response = await client.chat.completions.create({

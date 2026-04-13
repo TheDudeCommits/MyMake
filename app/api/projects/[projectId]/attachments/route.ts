@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { AttachmentManager } from "@/lib/server/attachment-manager";
 import { saveAttachments } from "@/lib/server/project-service";
 
 export const runtime = "nodejs";
@@ -16,6 +17,11 @@ export async function POST(
 
     if (!files.length) {
       return NextResponse.json({ error: "No attachments were provided." }, { status: 400 });
+    }
+
+    const validation = new AttachmentManager().validate(files);
+    if (!validation.valid) {
+      return NextResponse.json({ error: validation.errors.join(" ") }, { status: 400 });
     }
 
     const attachments = await saveAttachments(

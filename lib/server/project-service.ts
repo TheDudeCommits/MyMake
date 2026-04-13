@@ -7,6 +7,8 @@ import os from "node:os";
 
 import { nanoid } from "nanoid";
 
+import { AttachmentManager } from "@/lib/server/attachment-manager";
+import { buildManagedAiContext } from "@/lib/server/ai-context";
 import {
   DEFAULT_AI_MODEL_KEY,
   isCodexModel,
@@ -2558,6 +2560,21 @@ export async function applyAiEdit(
       };
     }),
   );
+  const attachmentManager = new AttachmentManager();
+  const processedAttachments = await attachmentManager.processSources(
+    attachments.map((attachment) => ({
+      kind: "stored" as const,
+      ...attachment,
+    })),
+  );
+  const attachmentWarnings = processedAttachments
+    .flatMap((attachment) => [
+      ...(attachment.error
+        ? [`Attachment ${attachment.filename} could not be processed: ${attachment.error}`]
+        : []),
+      ...attachment.warnings.map((warning) => `${attachment.filename}: ${warning}`),
+    ])
+    .slice(0, 8);
 
   const projectFiles = await listProjectFiles(project.extractedPath);
   const recentTurns = getConversationTurns(payload.projectId).slice(-12);
@@ -2604,6 +2621,17 @@ export async function applyAiEdit(
   });
   const editMode: EditMode = editPlan.mode;
   const activeKitSummaries = describeKitAssets(kits);
+  const managedAiContext = await buildManagedAiContext({
+    projectDir: project.extractedPath,
+    projectName: project.name,
+    prompt: payload.prompt,
+    route,
+    selectionTarget,
+    contextGraph,
+    kits,
+    recentTurns,
+    knowledge,
+  });
   const provider =
     (payload.aiModelKey || DEFAULT_AI_MODEL_KEY).startsWith("openai")
       ? "openai"
@@ -2753,8 +2781,12 @@ Fix the root cause before applying the edit. You may update related files, style
             currentFilePath: effectiveCurrentFilePath,
             contextFiles: contextGraph.contextFiles,
             contextSummary: contextGraph.compressedMemory,
+            guidelinesText: managedAiContext.guidelinesText,
+            projectMemoryText: managedAiContext.projectMemoryText,
+            conversationHistoryText: managedAiContext.conversationHistoryText,
+            currentStateText: managedAiContext.currentStateText,
             activeKitSummaries,
-            attachments,
+            attachments: processedAttachments,
           });
           attemptResult = patchResult;
           attemptChangedFiles = await applyPatchOperations(project.extractedPath, patchResult.operations);
@@ -2774,8 +2806,12 @@ Fix the root cause before applying the edit. You may update related files, style
           currentFilePath: effectiveCurrentFilePath,
           contextFiles: contextGraph.contextFiles,
           contextSummary: contextGraph.compressedMemory,
+          guidelinesText: managedAiContext.guidelinesText,
+          projectMemoryText: managedAiContext.projectMemoryText,
+          conversationHistoryText: managedAiContext.conversationHistoryText,
+          currentStateText: managedAiContext.currentStateText,
           activeKitSummaries,
-          attachments,
+          attachments: processedAttachments,
         });
         attemptResult = rewriteResult;
         attemptChangedFiles = rewriteResult.changedFiles;
@@ -2903,7 +2939,7 @@ Fix the root cause before applying the edit. You may update related files, style
       selectionTarget,
       contextSnapshotId: contextSnapshot.id,
       validationResultId: validationResult.id,
-      warnings: validationResult.warnings,
+      warnings: [...validationResult.warnings, ...attachmentWarnings],
     });
     getDb()
       .prepare(`UPDATE conversation_turns SET status = ? WHERE id = ?`)
@@ -2926,6 +2962,7 @@ Fix the root cause before applying the edit. You may update related files, style
     revisionId: revision.id,
   });
   const allWarnings = [...aiResult.warnings, ...validationResult.warnings];
+  allWarnings.push(...attachmentWarnings);
   if (successfulAttemptCount > 1) {
     allWarnings.push(`Codex recovered after ${successfulAttemptCount} attempts.`);
   }
