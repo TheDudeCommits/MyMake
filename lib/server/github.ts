@@ -45,6 +45,27 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+export function getPublicAppBaseUrl(fallbackOrigin?: string | null): string {
+  const configuredBaseUrl = getEnv().appBaseUrl?.trim();
+  if (configuredBaseUrl) {
+    return trimTrailingSlash(configuredBaseUrl);
+  }
+
+  if (fallbackOrigin) {
+    return trimTrailingSlash(fallbackOrigin);
+  }
+
+  return "http://localhost:3000";
+}
+
+export function buildGitHubCallbackUrl(fallbackOrigin?: string | null): string {
+  return new URL("/api/github/callback", getPublicAppBaseUrl(fallbackOrigin)).toString();
+}
+
 export function isGitHubConfigured(): boolean {
   const env = getEnv();
   return Boolean(env.githubClientId && env.githubClientSecret);

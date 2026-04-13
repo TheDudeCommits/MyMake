@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
+  buildGitHubCallbackUrl,
   exchangeGitHubCodeForToken,
   GITHUB_REDIRECT_COOKIE_NAME,
   GITHUB_STATE_COOKIE_NAME,
@@ -30,7 +31,7 @@ export async function GET(request: Request) {
   }
 
   try {
-    const redirectUri = new URL("/api/github/callback", requestUrl.origin).toString();
+    const redirectUri = buildGitHubCallbackUrl(requestUrl.origin);
     const token = await exchangeGitHubCodeForToken({
       code,
       redirectUri,

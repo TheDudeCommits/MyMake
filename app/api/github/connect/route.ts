@@ -4,6 +4,7 @@ import { nanoid } from "nanoid";
 
 import { requireCurrentAppUser } from "@/lib/server/auth-next";
 import {
+  buildGitHubCallbackUrl,
   buildGitHubAuthorizeUrl,
   GITHUB_REDIRECT_COOKIE_NAME,
   GITHUB_STATE_COOKIE_NAME,
@@ -25,7 +26,7 @@ export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const state = nanoid(24);
   const redirectPath = requestUrl.searchParams.get("redirect") || "/";
-  const redirectUri = new URL("/api/github/callback", requestUrl.origin).toString();
+  const redirectUri = buildGitHubCallbackUrl(requestUrl.origin);
   const authorizeUrl = buildGitHubAuthorizeUrl({
     state,
     redirectUri,

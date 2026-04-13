@@ -132,14 +132,77 @@ function extractAvatarUrl(user: PrivyUser): string | null {
 }
 
 function claimLegacyOwnershipIfNeeded(user: AppUserRecord): void {
+  const db = getDb();
   const email = user.email?.trim().toLowerCase();
   const primaryOwnerEmail = getEnv().primaryOwnerEmail.trim().toLowerCase();
+  const legacyProjectCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS count
+             FROM projects
+            WHERE owner_user_id IS NULL`,
+        )
+        .get() as { count: number }
+    ).count,
+  );
+  const legacyGitHubConnectionCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS count
+             FROM github_connections
+            WHERE owner_user_id IS NULL`,
+        )
+        .get() as { count: number }
+    ).count,
+  );
 
-  if (!email || email !== primaryOwnerEmail) {
+  if (legacyProjectCount === 0 && legacyGitHubConnectionCount === 0) {
     return;
   }
 
-  getDb()
+  const ownedProjectCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS count
+             FROM projects
+            WHERE owner_user_id IS NOT NULL`,
+        )
+        .get() as { count: number }
+    ).count,
+  );
+  const ownedGitHubConnectionCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS count
+             FROM github_connections
+            WHERE owner_user_id IS NOT NULL`,
+        )
+        .get() as { count: number }
+    ).count,
+  );
+  const userCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS count
+             FROM users`,
+        )
+        .get() as { count: number }
+    ).count,
+  );
+  const canClaimByPrimaryEmail = Boolean(email && email === primaryOwnerEmail);
+  const canClaimAsFirstMigratedUser =
+    userCount === 1 && ownedProjectCount === 0 && ownedGitHubConnectionCount === 0;
+
+  if (!canClaimByPrimaryEmail && !canClaimAsFirstMigratedUser) {
+    return;
+  }
+
+  db
     .prepare(
       `UPDATE projects
           SET owner_user_id = ?
@@ -147,7 +210,7 @@ function claimLegacyOwnershipIfNeeded(user: AppUserRecord): void {
     )
     .run(user.id);
 
-  getDb()
+  db
     .prepare(
       `UPDATE github_connections
           SET owner_user_id = ?
