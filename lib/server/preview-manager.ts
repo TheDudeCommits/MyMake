@@ -92,19 +92,31 @@ async function getAvailablePort(): Promise<number> {
 async function waitForRunner(targetUrl: string): Promise<void> {
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
-    try {
-      const response = await fetch(targetUrl, { redirect: "manual" });
-      if (response.status < 400) {
-        return;
-      }
-    } catch {
-      // The runner is still warming up.
+    if (await canReachRunner(targetUrl, 2_000)) {
+      return;
     }
 
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
 
   throw new Error("Timed out while starting the project preview.");
+}
+
+async function canReachRunner(targetUrl: string, timeoutMs = 1_500): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(targetUrl, {
+      redirect: "manual",
+      signal: controller.signal,
+    });
+    return response.status < 500;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function loadProject(projectId: string) {
@@ -473,8 +485,12 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
 
   const existing = runtime.runners.get(projectId);
   if (existing && existing.status !== "error" && !existing.process.killed) {
-    touchRunner(existing);
-    return existing;
+    if (existing.status !== "ready" || (await canReachRunner(existing.targetUrl))) {
+      touchRunner(existing);
+      return existing;
+    }
+
+    await stopPreviewRunner(projectId);
   }
 
   const startPromise = (async () => {
@@ -483,7 +499,7 @@ export async function ensurePreviewRunner(projectId: string): Promise<PreviewRun
     const project = await loadProject(projectId);
     await normalizeImportedProject(project.extracted_path);
     await ensureProjectDependenciesInstalled(project);
-    const port = project.preview_port || (await getAvailablePort());
+    const port = await getAvailablePort();
     const targetUrl = `http://127.0.0.1:${port}`;
     const runnerSpec = await getRunnerSpec(
       projectId,
