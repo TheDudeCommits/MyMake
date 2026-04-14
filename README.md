@@ -1,5 +1,7 @@
 # MyMake
 
+Detailed handoff: [HANDOFF.md](./HANDOFF.md)
+
 MyMake is a Privy-authenticated AI-powered UI editor for uploaded React frontend projects. It accepts a zipped frontend app, spins up a live preview runner, lets you pick elements directly in the preview, and sends focused edit requests to AI models with revision history, attachments, device previews, Monaco editing, export support, and per-user project ownership.
 
 ## Stack
