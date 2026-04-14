@@ -757,6 +757,15 @@ function scoreFileCandidate(params: {
       reasons.push("contains chart line styling");
     }
     if (
+      params.selection.visualType === "chart-line" &&
+      /\b(areachart|linechart|responsivecontainer|recharts|builddirectionalsegments)\b/i.test(
+        normalizedContent,
+      )
+    ) {
+      score += 32;
+      reasons.push("renders chart primitives directly");
+    }
+    if (
       params.selection.visualType === "chart-area" &&
       /\b(area|fill|gradient|chart)\b/i.test(normalizedContent)
     ) {
@@ -783,6 +792,17 @@ function scoreFileCandidate(params: {
     ) {
       score -= 22;
       reasons.push("route-level file lacks selected instance anchors");
+    }
+    if (
+      params.selection.visualType === "chart-line" &&
+      params.routeCandidates.has(params.filePath) &&
+      /\b(import\s+\{[^}]*depositsbreakdown[^}]*\}|<DepositsBreakdown\b|export default function App\b)/i.test(
+        params.content || "",
+      ) &&
+      !/\b(areachart|linechart|builddirectionalsegments)\b/i.test(normalizedContent)
+    ) {
+      score -= 28;
+      reasons.push("route file delegates chart rendering to a child component");
     }
   }
 
@@ -1366,8 +1386,12 @@ function resolveEditIntent(params: {
   const directionalTrendInstruction = extractDirectionalTrendInstruction(prompt);
   if (
     directionalTrendInstruction &&
-    target?.visualType === "chart-line" &&
-    Boolean(target.resolvedHandles.some((handle) => handle.key === "line-color"))
+    target &&
+    (target.visualType === "chart-line" ||
+      Boolean(target.resolvedHandles.some((handle) => handle.key === "line-color")) ||
+      /\b(chart|sparkline|trend|deposits breakdown|revenue overview)\b/i.test(
+        [target.summary, target.componentName, target.sectionName].filter(Boolean).join(" "),
+      ))
   ) {
     return {
       kind: "set-directional-trend-colors",

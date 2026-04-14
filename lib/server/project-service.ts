@@ -2611,6 +2611,32 @@ function inferSelectedInstanceLabel(selectionTarget: SelectionTarget | null, con
   return null;
 }
 
+function inferSelectedInstanceIndex(selectionTarget: SelectionTarget | null): number | null {
+  if (!selectionTarget) {
+    return null;
+  }
+
+  const candidates = [
+    selectionTarget.instanceScope || "",
+    selectionTarget.payload.scopeSelector || "",
+    selectionTarget.payload.scopedSelector || "",
+  ];
+
+  for (const candidate of candidates) {
+    const match = candidate.match(/:nth-of-type\((\d+)\)/i);
+    if (!match) {
+      continue;
+    }
+
+    const value = Number(match[1]);
+    if (Number.isInteger(value) && value > 0) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 function replaceStyleValueWithKeywords(params: {
   content: string;
   keywords: string[];
@@ -2743,6 +2769,7 @@ async function tryApplyDirectionalTrendEdit(params: {
     const currentContent = await fs.readFile(absolutePath, "utf8");
     let nextContent = currentContent;
     const selectedLabel = inferSelectedInstanceLabel(params.selectionTarget, currentContent);
+    const selectedInstanceIndex = inferSelectedInstanceIndex(params.selectionTarget);
     let appliedScopedPatch = false;
 
     if (
@@ -2783,12 +2810,8 @@ async function tryApplyDirectionalTrendEdit(params: {
         "stopColor={upTrendColor} stopOpacity={areaOpacity}",
       );
 
-      const labelPattern = new RegExp(
-        `(<DepositCard[\\s\\S]*?label=["']${escapeRegExp(selectedLabel)}["'][\\s\\S]*?)(/>)`,
-      );
-      const existingMatch = nextContent.match(labelPattern);
-      if (existingMatch) {
-        let scopedInstance = existingMatch[1];
+      const injectScopedProps = (input: string): string => {
+        let scopedInstance = input;
         if (!/upTrendColor=/.test(scopedInstance)) {
           scopedInstance += `\n          upTrendColor="${instruction.upColor}"`;
         }
@@ -2798,8 +2821,33 @@ async function tryApplyDirectionalTrendEdit(params: {
         if (instruction.lineOnly && !/areaOpacity=/.test(scopedInstance)) {
           scopedInstance += `\n          areaOpacity={0}`;
         }
-        nextContent = nextContent.replace(labelPattern, `${scopedInstance}$2`);
-        appliedScopedPatch = true;
+        return scopedInstance;
+      };
+
+      if (selectedLabel) {
+        const labelPattern = new RegExp(
+          `(<DepositCard[\\s\\S]*?label=["']${escapeRegExp(selectedLabel)}["'][\\s\\S]*?)(/>)`,
+        );
+        const existingMatch = nextContent.match(labelPattern);
+        if (existingMatch) {
+          nextContent = nextContent.replace(labelPattern, `${injectScopedProps(existingMatch[1])}$2`);
+          appliedScopedPatch = true;
+        }
+      }
+
+      if (!appliedScopedPatch && selectedInstanceIndex) {
+        const cardMatches = [...nextContent.matchAll(/<DepositCard[\s\S]*?\/>/g)];
+        const candidate = cardMatches[selectedInstanceIndex - 1];
+        if (candidate && typeof candidate.index === "number") {
+          const start = candidate.index;
+          const end = start + candidate[0].length;
+          nextContent =
+            nextContent.slice(0, start) +
+            injectScopedProps(candidate[0].slice(0, -2)) +
+            "/>" +
+            nextContent.slice(end);
+          appliedScopedPatch = true;
+        }
       }
     }
 

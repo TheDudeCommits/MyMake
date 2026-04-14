@@ -234,6 +234,33 @@ export function buildPreviewBridgeScript(projectId: string): string {
         return ["path", "line", "polyline", "circle", "rect", "polygon", "svg"].includes(tagName);
       }
 
+      function findRepresentativeVisualElement(element) {
+        if (!(element instanceof Element)) {
+          return null;
+        }
+
+        if (isChartPrimitive(element)) {
+          return element;
+        }
+
+        const strokeCandidate = element.querySelector(
+          'svg path[stroke], svg polyline[stroke], svg line[stroke], svg circle[stroke], svg rect[stroke], svg polygon[stroke]',
+        );
+        if (strokeCandidate instanceof Element) {
+          return strokeCandidate;
+        }
+
+        const fillCandidate = element.querySelector(
+          'svg path[fill]:not([fill="none"]), svg polygon[fill]:not([fill="none"]), svg rect[fill]:not([fill="none"])',
+        );
+        if (fillCandidate instanceof Element) {
+          return fillCandidate;
+        }
+
+        const svgRoot = element.querySelector("svg");
+        return svgRoot instanceof Element ? svgRoot : null;
+      }
+
       function normalizeSelectionElement(element) {
         if (!(element instanceof Element) || !isChartPrimitive(element)) {
           return element;
@@ -318,8 +345,9 @@ export function buildPreviewBridgeScript(projectId: string): string {
       }
 
       function detectVisualType(element) {
-        const tagName = element.tagName.toLowerCase();
-        const parentTag = element.parentElement ? element.parentElement.tagName.toLowerCase() : "";
+        const representative = findRepresentativeVisualElement(element) || element;
+        const tagName = representative.tagName.toLowerCase();
+        const parentTag = representative.parentElement ? representative.parentElement.tagName.toLowerCase() : "";
         if (tagName === "img") {
           return "image";
         }
@@ -327,9 +355,9 @@ export function buildPreviewBridgeScript(projectId: string): string {
           return "vector";
         }
         if (tagName === "path" || tagName === "line" || tagName === "polyline") {
-          if (parentTag === "svg" || element.closest("svg")) {
-            const hasStroke = element.getAttribute("stroke");
-            const hasFill = element.getAttribute("fill");
+          if (parentTag === "svg" || representative.closest("svg")) {
+            const hasStroke = representative.getAttribute("stroke");
+            const hasFill = representative.getAttribute("fill");
             if (hasStroke && (!hasFill || hasFill === "none")) {
               return "chart-line";
             }
@@ -444,14 +472,15 @@ export function buildPreviewBridgeScript(projectId: string): string {
       }
 
       function inferEditableProperties(element) {
-        const style = getComputedStyleSafe(element);
+        const representative = findRepresentativeVisualElement(element) || element;
+        const style = getComputedStyleSafe(representative);
         const strokeValue =
-          element.getAttribute("stroke") ||
-          element.getAttribute("data-stroke") ||
+          representative.getAttribute("stroke") ||
+          representative.getAttribute("data-stroke") ||
           style?.stroke ||
           "";
         const fillValue =
-          element.getAttribute("fill") ||
+          representative.getAttribute("fill") ||
           style?.fill ||
           style?.backgroundColor ||
           "";
@@ -520,15 +549,18 @@ export function buildPreviewBridgeScript(projectId: string): string {
 
       function buildSelectionAttributes(rawElement, semanticElement) {
         const attributes = attributeMap(rawElement);
+        const representative = findRepresentativeVisualElement(rawElement) || rawElement;
         const rawStyle = getComputedStyleSafe(rawElement);
+        const representativeStyle =
+          representative === rawElement ? rawStyle : getComputedStyleSafe(representative);
         const semanticStyle = rawElement === semanticElement ? rawStyle : getComputedStyleSafe(semanticElement);
         const strokeValue =
-          rawElement.getAttribute("stroke") ||
-          rawStyle?.stroke ||
+          representative.getAttribute("stroke") ||
+          representativeStyle?.stroke ||
           "";
         const fillValue =
-          rawElement.getAttribute("fill") ||
-          rawStyle?.fill ||
+          representative.getAttribute("fill") ||
+          representativeStyle?.fill ||
           "";
 
         if (strokeValue && strokeValue !== "none") {

@@ -337,6 +337,70 @@ test("buildEditPlan routes directional chart-line prompts through the determinis
   assert.equal(plan.strategy, "direct-property");
 });
 
+test("buildEditPlan still routes directional chart prompts deterministically when the selected region is a chart container", async () => {
+  const selectionTarget = {
+    targetId: "target-4",
+    fingerprint: "div::virtual-card::sparkline-container",
+    route: "/",
+    label: "Virtual",
+    summary: "Virtual / Deposits / $9.80M / Deposits Breakdown",
+    sourceFilePath: "src/app/components/DepositsBreakdown.tsx",
+    sourceCandidates: [
+      {
+        path: "src/app/components/DepositsBreakdown.tsx",
+        score: 228,
+        reason: "contains \"Virtual\"; contains \"Deposits\"; renders chart primitives directly",
+        matchedTerms: ["virtual", "deposits", "sparkline", "chart"],
+      },
+    ],
+    confidence: 0.9,
+    componentName: "Deposits Breakdown",
+    sectionName: "Deposits Breakdown",
+    repeatGroup: "Card",
+    instanceScope: ".deposit-card:nth-of-type(1)",
+    visualType: "container",
+    resolvedHandles: [
+      {
+        key: "line-color",
+        label: "Line color",
+        confidence: 0.93,
+        currentValue: "#8b949e",
+      },
+      {
+        key: "visibility",
+        label: "Visibility",
+        confidence: 0.9,
+        currentValue: null,
+      },
+    ],
+    editableCapabilities: [
+      { key: "line-color", label: "Line color", confidence: 0.93 },
+      { key: "visibility", label: "Visibility", confidence: 0.9 },
+    ],
+    payload: createSelection({
+      tagName: "div",
+      visualType: "container",
+      attributes: { stroke: "#8b949e" },
+      editableProperties: ["line-color", "visibility", "layout"],
+      reactComponentStack: [],
+      reactSourceHints: [],
+    }),
+  } satisfies SelectionTarget;
+
+  const plan = buildEditPlan({
+    currentFilePath: "src/app/components/DepositsBreakdown.tsx",
+    currentFileContent: "const UP_TREND_COLOR = '#8b949e'; const DOWN_TREND_COLOR = '#8b949e';",
+    prompt: "Downward movements should be red, only upward movements green.",
+    runtime: "vite",
+    selectionTarget,
+    contextGraph: createContextGraph(["src/app/components/DepositsBreakdown.tsx"], selectionTarget),
+    hasStaticEditableSupport: false,
+  });
+
+  assert.equal(plan.intent.kind, "set-directional-trend-colors");
+  assert.equal(plan.lane, "deterministic");
+});
+
 test("buildEditPlan requires confirmation when target confidence is low", async () => {
   const selectionTarget = {
     targetId: "target-2",
