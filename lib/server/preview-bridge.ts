@@ -143,6 +143,28 @@ export function buildPreviewBridgeScript(projectId: string): string {
         return segments.length ? segments.join(" > ") : null;
       }
 
+      function stripNthOfType(selector) {
+        if (!selector) {
+          return null;
+        }
+
+        return selector.replace(/:nth-of-type\(\d+\)/gi, "");
+      }
+
+      function inferInstanceIndex(selector) {
+        if (!selector) {
+          return null;
+        }
+
+        const match = selector.match(/:nth-of-type\((\d+)\)/i);
+        if (!match) {
+          return null;
+        }
+
+        const value = Number(match[1]);
+        return Number.isInteger(value) && value > 0 ? value : null;
+      }
+
       function getFramerAncestors(element) {
         const names = [];
         let current = element;
@@ -595,6 +617,17 @@ export function buildPreviewBridgeScript(projectId: string): string {
         const contextTexts = getNearbyTextContext(semanticElement);
         const visualType = detectVisualType(element);
         const reactDebug = getReactDebugContext(element);
+        const instanceIndex =
+          inferInstanceIndex(scopeSelector) || inferInstanceIndex(scopedSelector) || null;
+        const allInstanceSelector =
+          stripNthOfType(scopeSelector) ||
+          stripNthOfType(scopedSelector) ||
+          null;
+        const repeatKey =
+          (framerRoot ? framerRoot.getAttribute("data-framer-name") : null) ||
+          contextTexts[0] ||
+          allInstanceSelector ||
+          null;
         return {
           route: getPreviewRoute(),
           url: window.location.href,
@@ -624,6 +657,10 @@ export function buildPreviewBridgeScript(projectId: string): string {
             semanticElement.getAttribute("data-framer-appear-id") ||
             framerRoot?.getAttribute("data-framer-appear-id") ||
             scopeSelector,
+          instanceIndex,
+          allInstanceSelector,
+          repeatKey,
+          targetScope: "instance",
           contextTexts,
           visualType,
           reactComponentStack: reactDebug.componentStack,

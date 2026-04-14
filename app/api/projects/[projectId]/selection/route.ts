@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { applyAiEdit, getDashboardSnapshot, getWorkspaceSnapshot } from "@/lib/server/project-service";
+import { resolveProjectSelection } from "@/lib/server/project-service";
 
 export const runtime = "nodejs";
 
@@ -44,35 +44,8 @@ const selectionSchema = z
   .nullable();
 
 const bodySchema = z.object({
-  projectId: z.string(),
-  revisionId: z.string(),
-  prompt: z.string().min(1),
   selection: selectionSchema,
-  attachmentIds: z.array(z.string()).default([]),
-  editMode: z.enum(["precise", "scoped", "creative"]).nullable().optional(),
-  aiModelKey: z
-    .enum(["openai-chatgpt-5-2", "openai-codex", "anthropic-sonnet-4-6"])
-    .nullable()
-    .optional(),
   currentFilePath: z.string().nullable().optional(),
-  inspectorAction: z
-    .object({
-      kind: z.enum([
-        "replace-text",
-        "set-line-color",
-        "set-fill-color",
-        "set-background-color",
-        "set-spacing",
-        "set-radius",
-        "set-size",
-        "set-visibility",
-        "swap-image",
-      ]),
-      value: z.string().nullable().optional(),
-      axis: z.enum(["all", "x", "y"]).nullable().optional(),
-    })
-    .nullable()
-    .optional(),
 });
 
 export async function POST(
@@ -81,40 +54,17 @@ export async function POST(
 ) {
   try {
     const body = bodySchema.parse(await request.json());
-    const result = await applyAiEdit({
-      ...body,
+    const target = await resolveProjectSelection({
       projectId: params.projectId,
+      selection: body.selection,
+      currentFilePath: body.currentFilePath,
     });
-    const snapshot = await getDashboardSnapshot(params.projectId);
 
-    return NextResponse.json({
-      ...snapshot,
-      currentProject: result.workspace,
-      ai: {
-        summary: result.summary,
-        warnings: result.warnings,
-        changedFiles: result.changedFiles,
-      },
-    });
+    return NextResponse.json({ target });
   } catch (error) {
-    let details: string[] = [];
-    let rawProviderOutput: string | null = null;
-
-    try {
-      const workspace = await getWorkspaceSnapshot(params.projectId);
-      if (workspace.lastValidationResult?.status !== "passed") {
-        details = workspace.lastValidationResult?.details || [];
-        rawProviderOutput = workspace.lastValidationResult?.rawProviderOutput || null;
-      }
-    } catch {
-      // Keep the error response lightweight if workspace inspection also fails.
-    }
-
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : "The AI edit request failed.",
-        details,
-        rawProviderOutput,
+        error: error instanceof Error ? error.message : "Could not resolve the selected element.",
       },
       { status: 400 },
     );

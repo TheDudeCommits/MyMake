@@ -30,6 +30,7 @@ export type ConversationTurnStatus = "pending" | "applied" | "failed" | "info";
 export type EditStrategy = "direct-property" | "static-override" | "patch" | "rewrite";
 export type EditRisk = "low" | "medium" | "high";
 export type ExecutionLane = "deterministic" | "scoped-ai" | "deep-fix";
+export type SelectionScopeMode = "instance" | "all-matching";
 export type EditIntentKind =
   | "replace-text"
   | "set-line-color"
@@ -107,6 +108,10 @@ export interface SelectionPayload {
   editableProperties: string[];
   fingerprint?: string;
   instanceScope?: string | null;
+  instanceIndex?: number | null;
+  allInstanceSelector?: string | null;
+  repeatKey?: string | null;
+  targetScope?: SelectionScopeMode | null;
   contextTexts?: string[];
   visualType?: string | null;
   reactComponentStack?: string[];
@@ -210,6 +215,8 @@ export interface SelectionTarget {
   sectionName: string | null;
   repeatGroup: string | null;
   instanceScope: string | null;
+  instanceIndex: number | null;
+  scopeMode: SelectionScopeMode;
   visualType: string | null;
   resolvedHandles: ResolvedHandle[];
   editableCapabilities: EditableCapability[];
@@ -348,6 +355,10 @@ export interface AiEditRequestPayload {
   aiModelKey?: AiModelKey | null;
   currentFilePath?: string | null;
   inspectorAction?: InspectorAction | null;
+}
+
+export interface SelectionResolutionResponse {
+  target: SelectionTarget | null;
 }
 
 export interface AiChangedFile {

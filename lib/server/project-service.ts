@@ -1828,6 +1828,28 @@ export async function getWorkspaceSnapshot(
   };
 }
 
+export async function resolveProjectSelection(params: {
+  projectId: string;
+  selection: SelectionPayload | null;
+  currentFilePath?: string | null;
+}): Promise<SelectionTarget | null> {
+  const userId = await requireCurrentUserId();
+  const project = getProjectRow(params.projectId, userId);
+  const runtime = requireRuntime(await detectProjectRuntime(project.extractedPath));
+  await syncProjectKnowledgeAndKits(project, runtime);
+
+  const files = await listProjectFiles(project.extractedPath);
+  const knowledge = await readKnowledgeFiles(project.extractedPath);
+
+  return buildSelectionTarget({
+    projectDir: project.extractedPath,
+    route: params.selection?.route || "/",
+    currentFilePath: resolvePreferredAiFilePath(files, params.currentFilePath),
+    selection: params.selection,
+    componentIndex: knowledge.componentIndex,
+  });
+}
+
 export async function getDashboardSnapshot(
   selectedProjectId?: string | null,
 ): Promise<DashboardSnapshot> {
@@ -2505,17 +2527,31 @@ async function tryApplyDirectTextReplacement(params: {
       continue;
     }
 
+    const applyGlobally = params.selectionTarget?.scopeMode === "all-matching";
+    const nextContent = applyGlobally
+      ? currentContent.split(textChange.sourceText).join(textChange.replacementText)
+      : currentContent.replace(textChange.sourceText, textChange.replacementText);
+    const replacements = applyGlobally
+      ? currentContent.split(textChange.sourceText).length - 1
+      : 1;
+
     return {
-      summary: `Updated "${textChange.sourceText}" to "${textChange.replacementText}" directly in ${filePath}.`,
+      summary: applyGlobally
+        ? `Updated ${replacements} matching "${textChange.sourceText}" occurrence(s) to "${textChange.replacementText}" in ${filePath}.`
+        : `Updated "${textChange.sourceText}" to "${textChange.replacementText}" directly in ${filePath}.`,
       warnings: [],
       changedFiles: [
         {
           path: filePath,
-          content: currentContent.replace(textChange.sourceText, textChange.replacementText),
+          content: nextContent,
           reason:
             textChange.source === "prompt"
-              ? "Direct text replacement from the prompt."
-              : "Direct text replacement from the selected element.",
+              ? applyGlobally
+                ? "Direct repeated text replacement from the prompt."
+                : "Direct text replacement from the prompt."
+              : applyGlobally
+                ? "Direct repeated text replacement from the selected element."
+                : "Direct text replacement from the selected element.",
         },
       ],
       rawResponse: null,
@@ -2539,6 +2575,8 @@ function collectStableTargetAnchors(selectionTarget: SelectionTarget | null): st
       selectionTarget.label,
       selectionTarget.componentName || "",
       selectionTarget.sectionName || "",
+      selectionTarget.repeatGroup || "",
+      selectionTarget.payload.repeatKey || "",
       ...(selectionTarget.payload.contextTexts || []),
       ...(selectionTarget.payload.reactComponentStack || []),
       ...(selectionTarget.payload.reactSourceHints || []).filter((value) => !/\.[a-z0-9]+$/i.test(value)),
@@ -2614,6 +2652,10 @@ function inferSelectedInstanceLabel(selectionTarget: SelectionTarget | null, con
 function inferSelectedInstanceIndex(selectionTarget: SelectionTarget | null): number | null {
   if (!selectionTarget) {
     return null;
+  }
+
+  if (selectionTarget.instanceIndex && selectionTarget.instanceIndex > 0) {
+    return selectionTarget.instanceIndex;
   }
 
   const candidates = [
@@ -2759,6 +2801,7 @@ async function tryApplyDirectionalTrendEdit(params: {
   if (!params.selectionTarget || !instruction) {
     return null;
   }
+  const applyToAllMatching = params.selectionTarget.scopeMode === "all-matching";
 
   for (const filePath of params.allowedFiles) {
     const absolutePath = resolveInsideRoot(params.projectDir, filePath);
@@ -2775,7 +2818,7 @@ async function tryApplyDirectionalTrendEdit(params: {
     if (
       /function buildDirectionalSegments\s*\(/.test(nextContent) &&
       /function DepositCard\s*\(/.test(nextContent) &&
-      selectedLabel
+      (selectedLabel || applyToAllMatching)
     ) {
       if (!/upTrendColor\?: string;/.test(nextContent)) {
         nextContent = nextContent.replace(
@@ -2824,7 +2867,7 @@ async function tryApplyDirectionalTrendEdit(params: {
         return scopedInstance;
       };
 
-      if (selectedLabel) {
+      if (!applyToAllMatching && selectedLabel) {
         const labelPattern = new RegExp(
           `(<DepositCard[\\s\\S]*?label=["']${escapeRegExp(selectedLabel)}["'][\\s\\S]*?)(/>)`,
         );
@@ -2835,7 +2878,7 @@ async function tryApplyDirectionalTrendEdit(params: {
         }
       }
 
-      if (!appliedScopedPatch && selectedInstanceIndex) {
+      if (!applyToAllMatching && !appliedScopedPatch && selectedInstanceIndex) {
         const cardMatches = [...nextContent.matchAll(/<DepositCard[\s\S]*?\/>/g)];
         const candidate = cardMatches[selectedInstanceIndex - 1];
         if (candidate && typeof candidate.index === "number") {
@@ -2849,9 +2892,23 @@ async function tryApplyDirectionalTrendEdit(params: {
           appliedScopedPatch = true;
         }
       }
+
+      if (applyToAllMatching) {
+        nextContent = nextContent.replace(
+          /upTrendColor = [^,\n]+,/,
+          `upTrendColor = "${instruction.upColor}",`,
+        );
+        nextContent = nextContent.replace(
+          /downTrendColor = [^,\n]+,/,
+          `downTrendColor = "${instruction.downColor}",`,
+        );
+        if (instruction.lineOnly) {
+          nextContent = nextContent.replace(/areaOpacity = [^,\n]+,/, "areaOpacity = 0,");
+        }
+      }
     }
 
-    if (!appliedScopedPatch && /UP_TREND_COLOR/.test(nextContent) && /DOWN_TREND_COLOR/.test(nextContent)) {
+    if (applyToAllMatching && !appliedScopedPatch && /UP_TREND_COLOR/.test(nextContent) && /DOWN_TREND_COLOR/.test(nextContent)) {
       nextContent = nextContent.replace(
         /const UP_TREND_COLOR = ["'][^"']+["'];/,
         `const UP_TREND_COLOR = "${instruction.upColor}";`,
@@ -2874,9 +2931,11 @@ async function tryApplyDirectionalTrendEdit(params: {
     }
 
     return {
-      summary: appliedScopedPatch
-        ? `Updated the ${selectedLabel} trend line colors without tinting unrelated chart fills.`
-        : "Updated directional trend colors for the resolved chart component.",
+      summary: applyToAllMatching
+        ? "Updated all matching trend lines with directional colors while keeping the shade logic scoped."
+        : appliedScopedPatch
+          ? `Updated the ${selectedLabel} trend line colors without tinting unrelated chart fills.`
+          : "Updated directional trend colors for the resolved chart component.",
       warnings: [],
       changedFiles: [
         {
@@ -2944,6 +3003,64 @@ async function tryApplyDeterministicEdit(params: {
   return null;
 }
 
+function didDirectionalTrendEditTargetSelection(params: {
+  changedFiles: Array<{ path: string; content: string; reason?: string }>;
+  selectionTarget: SelectionTarget;
+  instruction: { upColor: string; downColor: string; lineOnly: boolean };
+}): boolean {
+  const { changedFiles, selectionTarget, instruction } = params;
+  const globalChangeDetected = changedFiles.some(
+    (file) =>
+      file.content.includes(instruction.upColor) &&
+      file.content.includes(instruction.downColor) &&
+      /(upTrendColor|downTrendColor|UP_TREND_COLOR|DOWN_TREND_COLOR|stroke)/i.test(file.content),
+  );
+
+  if (selectionTarget.scopeMode === "all-matching") {
+    return globalChangeDetected;
+  }
+
+  const selectedLabel = inferSelectedInstanceLabel(selectionTarget, changedFiles[0]?.content || "");
+  if (selectedLabel) {
+    const scopedPattern = new RegExp(
+      `<DepositCard[\\s\\S]*?label=["']${escapeRegExp(selectedLabel)}["'][\\s\\S]*?upTrendColor=["']${escapeRegExp(instruction.upColor)}["'][\\s\\S]*?downTrendColor=["']${escapeRegExp(instruction.downColor)}["'][\\s\\S]*?/>`,
+    );
+    const scopedLineOnlyPattern = new RegExp(
+      `<DepositCard[\\s\\S]*?label=["']${escapeRegExp(selectedLabel)}["'][\\s\\S]*?areaOpacity=\\{0\\}[\\s\\S]*?/>`,
+    );
+    if (
+      changedFiles.some(
+        (file) =>
+          scopedPattern.test(file.content) &&
+          (!instruction.lineOnly || scopedLineOnlyPattern.test(file.content)),
+      )
+    ) {
+      return true;
+    }
+  }
+
+  const selectedInstanceIndex = inferSelectedInstanceIndex(selectionTarget);
+  if (selectedInstanceIndex) {
+    for (const file of changedFiles) {
+      const cardMatches = [...file.content.matchAll(/<DepositCard[\s\S]*?\/>/g)];
+      const candidate = cardMatches[selectedInstanceIndex - 1]?.[0];
+      if (!candidate) {
+        continue;
+      }
+
+      const hasColors =
+        candidate.includes(`upTrendColor="${instruction.upColor}"`) &&
+        candidate.includes(`downTrendColor="${instruction.downColor}"`);
+      const hasLineOnly = !instruction.lineOnly || candidate.includes("areaOpacity={0}");
+      if (hasColors && hasLineOnly) {
+        return true;
+      }
+    }
+  }
+
+  return globalChangeDetected;
+}
+
 function validateTargetPersistence(params: {
   changedFiles: Array<{ path: string; content: string; reason?: string }>;
   selectionTarget: SelectionTarget | null;
@@ -2982,12 +3099,11 @@ function validateTargetPersistence(params: {
         const directionalInstruction = parseDirectionalTrendIntentValue(params.editPlan.intent);
         changedIntendedTarget = Boolean(
           directionalInstruction &&
-            params.changedFiles.some(
-              (file) =>
-                file.content.includes(directionalInstruction.upColor) &&
-                file.content.includes(directionalInstruction.downColor) &&
-                /stroke|UP_TREND_COLOR|DOWN_TREND_COLOR/i.test(file.content),
-            ),
+            didDirectionalTrendEditTargetSelection({
+              changedFiles: params.changedFiles,
+              selectionTarget: params.selectionTarget,
+              instruction: directionalInstruction,
+            }),
         );
       } else {
         const nextValue = params.editPlan.intent.requestedValue || "";
@@ -3007,7 +3123,9 @@ function validateTargetPersistence(params: {
       changedIntendedTarget = changedPaths.length > 0;
     }
   }
-  changedIntendedTarget = changedIntendedTarget && anchorMatched;
+  changedIntendedTarget =
+    changedIntendedTarget &&
+    (params.selectionTarget?.scopeMode === "all-matching" ? sourceMappingValid : anchorMatched);
 
   return {
     changedIntendedTarget,
@@ -3018,9 +3136,13 @@ function validateTargetPersistence(params: {
       changedIntendedTarget
         ? "The requested target change was persisted in the planned file scope."
         : "MyMake could not prove that the intended target changed.",
-      anchorMatched
-        ? "Changed files still match the selected instance anchors."
-        : "Changed files do not match the selected instance anchors, so the edit was treated as unsafe.",
+      params.selectionTarget?.scopeMode === "all-matching"
+        ? anchorMatched
+          ? "Changed files still match the repeated element anchors."
+          : "Changed files stayed inside the resolved repeated-element scope."
+        : anchorMatched
+          ? "Changed files still match the selected instance anchors."
+          : "Changed files do not match the selected instance anchors, so the edit was treated as unsafe.",
       sourceMappingValid
         ? "Changed files stayed within the resolved target scope."
         : "The edit touched files outside the resolved target scope.",

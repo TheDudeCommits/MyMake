@@ -637,6 +637,8 @@ function collectSelectionSearchTerms(selection: SelectionPayload): string[] {
   return unique([
     selection.nearestFramerName || "",
     selection.textContent || "",
+    selection.repeatKey || "",
+    selection.allInstanceSelector || "",
     ...(selection.contextTexts || []),
     ...(selection.reactComponentStack || []),
     ...(selection.reactSourceHints || []),
@@ -652,6 +654,7 @@ function collectSelectionPhrases(selection: SelectionPayload): string[] {
   return unique([
     selection.nearestFramerName || "",
     selection.textContent || "",
+    selection.repeatKey || "",
     ...(selection.contextTexts || []),
     ...(selection.reactComponentStack || []),
     ...(selection.reactSourceHints || []).filter((value) => !/\.[a-z0-9]+$/i.test(value)),
@@ -854,6 +857,7 @@ function inferConfidenceFromCandidates(
 
 function guessRepeatGroup(selection: SelectionPayload): string | null {
   const candidates = [
+    selection.repeatKey || "",
     selection.nearestFramerName || "",
     ...selection.classes,
     selection.domPath,
@@ -934,6 +938,7 @@ export async function buildSelectionTarget(params: {
     selection.instanceScope ||
     selection.scopeSelector ||
     (repeatGroup ? humanizeIdentifier(repeatGroup) : null);
+  const scopeMode = selection.targetScope || "instance";
 
   return {
     targetId: createHash("sha1")
@@ -960,6 +965,8 @@ export async function buildSelectionTarget(params: {
       humanizeIdentifier(selection.route === "/" ? "Home" : selection.route),
     repeatGroup,
     instanceScope,
+    instanceIndex: selection.instanceIndex || null,
+    scopeMode,
     visualType: selection.visualType || null,
     resolvedHandles: inferResolvedHandles(selection),
     editableCapabilities: inferEditableCapabilities(selection),

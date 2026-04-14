@@ -49,6 +49,9 @@ import type {
   ProjectWorkspace,
   RevisionRecord,
   SelectionPayload,
+  SelectionResolutionResponse,
+  SelectionScopeMode,
+  SelectionTarget,
 } from "@/lib/types";
 
 const DEVICE_PRESETS: Record<
@@ -273,6 +276,37 @@ function selectedElementSummary(selection: SelectionPayload | null): string {
     selection.selector ||
     selection.domPath
   );
+}
+
+function selectionSupportsAllMatching(selection: SelectionPayload | null): boolean {
+  if (!selection) {
+    return false;
+  }
+
+  return Boolean(
+    selection.allInstanceSelector ||
+      selection.instanceIndex ||
+      selection.instanceScope?.includes(":nth-of-type(") ||
+      selection.scopeSelector?.includes(":nth-of-type("),
+  );
+}
+
+function buildScopedSelectionPayload(
+  selection: SelectionPayload | null,
+  scopeMode: SelectionScopeMode,
+): SelectionPayload | null {
+  if (!selection) {
+    return null;
+  }
+
+  return {
+    ...selection,
+    targetScope: scopeMode,
+  };
+}
+
+function selectionScopeLabel(scopeMode: SelectionScopeMode): string {
+  return scopeMode === "all-matching" ? "All matching" : "This instance";
 }
 
 function normalizeColorForInput(value: string | null | undefined): string {
@@ -1281,6 +1315,9 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     initialSnapshot.defaultAiModelKey,
   );
   const [selectedElement, setSelectedElement] = useState<SelectionPayload | null>(null);
+  const [selectionScopeMode, setSelectionScopeMode] = useState<SelectionScopeMode>("instance");
+  const [resolvedSelectionTarget, setResolvedSelectionTarget] = useState<SelectionTarget | null>(null);
+  const [isResolvingSelection, setIsResolvingSelection] = useState(false);
   const [inspectorTextValue, setInspectorTextValue] = useState("");
   const [inspectorLineColor, setInspectorLineColor] = useState("#ffffff");
   const [inspectorFillColor, setInspectorFillColor] = useState("#ffffff");
@@ -1357,9 +1394,13 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const currentDevice = DEVICE_PRESETS[devicePreset];
   const isDesktopPreview = devicePreset === "desktop";
   const displayRoute = routeLabel(currentRoute);
+  const effectiveSelectedElement = useMemo(
+    () => buildScopedSelectionPayload(selectedElement, selectionScopeMode),
+    [selectedElement, selectionScopeMode],
+  );
   const plannedLaneLabel = useMemo(
-    () => inferPlannedLane(selectedElement, prompt),
-    [selectedElement, prompt],
+    () => inferPlannedLane(effectiveSelectedElement, prompt),
+    [effectiveSelectedElement, prompt],
   );
 
   useEffect(() => {
@@ -1507,11 +1548,58 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   useEffect(() => {
     setSelectedAttachmentIds([]);
     setSelectedElement(null);
+    setSelectionScopeMode("instance");
+    setResolvedSelectionTarget(null);
     setCurrentRoute("/");
     setExpandedTurnIds([]);
     setPreviewNonce(0);
     clearComposerDiagnostics();
   }, [currentProject?.project.id]);
+
+  useEffect(() => {
+    if (!currentProject?.project.id || !effectiveSelectedElement) {
+      setResolvedSelectionTarget(null);
+      setIsResolvingSelection(false);
+      return;
+    }
+
+    let cancelled = false;
+    const projectId = currentProject.project.id;
+
+    async function resolveSelection() {
+      setIsResolvingSelection(true);
+      try {
+        const response = await fetch(`/api/projects/${projectId}/selection`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            selection: effectiveSelectedElement,
+            currentFilePath: editorFilePath,
+          }),
+        });
+        const payload = await readJsonResponse<SelectionResolutionResponse>(response);
+        if (!cancelled) {
+          setResolvedSelectionTarget(payload.target);
+        }
+      } catch {
+        if (!cancelled) {
+          setResolvedSelectionTarget(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsResolvingSelection(false);
+        }
+      }
+    }
+
+    void resolveSelection();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentProject?.project.id, effectiveSelectedElement, editorFilePath]);
 
   useEffect(() => {
     setIsShareMenuOpen(false);
@@ -1696,6 +1784,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       if (event.data.type === "MYMAKE_SELECT") {
         const payload = event.data.payload as SelectionPayload;
         setSelectedElement(payload);
+        setSelectionScopeMode(payload?.targetScope || "instance");
         setCurrentRoute(payload?.route || "/");
         setIsPicking(false);
         setFeedback(
@@ -1897,7 +1986,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
         projectName: currentProject?.project.name || projectId,
         userId: viewer?.id || null,
         currentRoute,
-        selection: selectedElement,
+        selection: effectiveSelectedElement,
         previousFailures,
       }),
     });
@@ -1930,7 +2019,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     formData.append("prompt", prompt);
     formData.append("summary", bridgeResult.summary);
     formData.append("threadId", bridgeResult.threadId);
-    formData.append("selection", JSON.stringify(selectedElement));
+    formData.append("selection", JSON.stringify(effectiveSelectedElement));
     formData.append("changedFiles", JSON.stringify(bridgeResult.changedFiles));
 
     const response = await fetch(`/api/projects/${projectId}/codex/apply`, {
@@ -2340,7 +2429,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           projectId: currentProject.project.id,
           revisionId: currentProject.project.currentRevisionId,
           prompt,
-          selection: selectedElement,
+          selection: effectiveSelectedElement,
           attachmentIds: selectedAttachmentIds,
           aiModelKey: selectedAiModel.key,
           currentFilePath: editorFilePath,
@@ -2370,14 +2459,16 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     value?: string | null;
     promptOverride: string;
   }) {
-    if (!currentProject?.project.currentRevisionId || !selectedElement) {
+    if (!currentProject?.project.currentRevisionId || !effectiveSelectedElement) {
       return;
     }
 
     setIsRunningAi(true);
     setError(null);
     clearComposerDiagnostics();
-    setFeedback(`Applying a precise inspector edit to ${selectedElementTitle(selectedElement)}...`);
+    setFeedback(
+      `Applying a precise inspector edit to ${selectedElementTitle(effectiveSelectedElement)} (${selectionScopeLabel(selectionScopeMode).toLowerCase()})...`,
+    );
 
     try {
       const response = await fetch(`/api/projects/${currentProject.project.id}/ai-edit`, {
@@ -2389,7 +2480,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           projectId: currentProject.project.id,
           revisionId: currentProject.project.currentRevisionId,
           prompt: action.promptOverride,
-          selection: selectedElement,
+          selection: effectiveSelectedElement,
           attachmentIds: selectedAttachmentIds,
           aiModelKey: selectedAiModel?.key || fallbackAiModelKey,
           currentFilePath: editorFilePath,
@@ -3040,6 +3131,25 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                   <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
                     {selectedElementSummary(selectedElement)}
                   </p>
+                  {selectionSupportsAllMatching(selectedElement) ? (
+                    <div className="mt-3 flex items-center gap-2">
+                      {(["instance", "all-matching"] as SelectionScopeMode[]).map((mode) => (
+                        <button
+                          key={mode}
+                          className={
+                            selectionScopeMode === mode
+                              ? "rounded-full border border-[#5f62ff]/40 bg-[#5f62ff]/14 px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-white"
+                              : "rounded-full border border-white/[0.08] bg-[#262628] px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-400 transition hover:text-slate-200"
+                          }
+                          type="button"
+                          disabled={isRunningAi}
+                          onClick={() => setSelectionScopeMode(mode)}
+                        >
+                          {selectionScopeLabel(mode)}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                   {selectedElement ? (
                     <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] uppercase tracking-[0.16em] text-slate-500">
                       <div className="rounded-[10px] border border-white/[0.08] bg-[#262628] px-2.5 py-2">
@@ -3052,6 +3162,40 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                           {selectedElement.instanceScope || selectedElement.scopeSelector || "Exact layer"}
                         </span>
                       </div>
+                    </div>
+                  ) : null}
+                  {selectedElement ? (
+                    <div className="mt-3 rounded-[12px] border border-white/[0.08] bg-[#262628] px-3 py-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Resolved code</p>
+                        <span className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                          {isResolvingSelection
+                            ? "Resolving"
+                            : resolvedSelectionTarget
+                              ? `${Math.round(resolvedSelectionTarget.confidence * 100)}%`
+                              : "Pending"}
+                        </span>
+                      </div>
+                      <p className="mt-2 truncate text-sm font-medium text-slate-100">
+                        {resolvedSelectionTarget?.sourceFilePath || "No exact source file resolved yet"}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-slate-400">
+                        {resolvedSelectionTarget
+                          ? `${resolvedSelectionTarget.componentName || "Unknown component"} • ${selectionScopeLabel(resolvedSelectionTarget.scopeMode)}`
+                          : "MyMake is mapping this live layer to the most likely code component and file."}
+                      </p>
+                      {resolvedSelectionTarget?.sourceCandidates?.length ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {resolvedSelectionTarget.sourceCandidates.slice(0, 3).map((candidate) => (
+                            <span
+                              key={candidate.path}
+                              className="rounded-full border border-white/[0.08] bg-[#1f2023] px-2 py-1 text-[10px] text-slate-400"
+                            >
+                              {candidate.path}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                   {selectedElement?.editableProperties?.length ? (
