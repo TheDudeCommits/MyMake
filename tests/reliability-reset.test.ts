@@ -9,6 +9,7 @@ import {
   buildSelectionTarget,
   type ContextGraphResult,
 } from "@/lib/server/project-intelligence";
+import { debugApplyDirectionalTrendEditForTest } from "@/lib/server/project-service";
 import type { SelectionPayload, SelectionTarget } from "@/lib/types";
 
 async function createTempProject(structure: Record<string, string>) {
@@ -444,4 +445,131 @@ test("buildEditPlan requires confirmation when target confidence is low", async 
 
   assert.equal(plan.requiresConfirmation, true);
   assert.equal(plan.lane, "deep-fix");
+});
+
+test("directional trend deterministic edits can target a repeated instance by index without needing a label", async () => {
+  const projectDir = await createTempProject({
+    "src/app/components/DepositsBreakdown.tsx": `
+      const UP_TREND_COLOR = "#8b949e";
+      const DOWN_TREND_COLOR = "#8b949e";
+
+      type TrendSegment = {
+        color: string;
+        gradientId: string;
+      };
+
+      type DepositCardProps = {
+        label: string;
+        accent?: boolean;
+        delay?: number;
+      };
+
+      function buildDirectionalSegments(
+        chartData: Array<{ value: number }>,
+        gradientPrefix: string,
+      ): TrendSegment[] {
+        const first = chartData[0]?.value ?? 0;
+        const last = chartData.at(-1)?.value ?? first;
+        const isUpTrend = last >= first;
+        const color = isUpTrend ? UP_TREND_COLOR : DOWN_TREND_COLOR;
+        return [{ color, gradientId: gradientPrefix }];
+      }
+
+      function DepositCard({
+        label,
+        accent = false,
+        delay = 0,
+      }: DepositCardProps) {
+        const chartData = [{ value: 1 }, { value: 2 }];
+        const gradientId = label.toLowerCase();
+        const segments = buildDirectionalSegments(chartData, gradientId);
+        return (
+          <article className="deposit-card">
+            <h3>{label}</h3>
+            <svg>
+              {segments.map((segment) => (
+                <linearGradient key={segment.gradientId}>
+                  <stop stopColor={segment.color} stopOpacity={0.2} />
+                </linearGradient>
+              ))}
+            </svg>
+          </article>
+        );
+      }
+
+      export function DepositsBreakdown() {
+        return (
+          <section>
+            <DepositCard label="Virtual" />
+            <DepositCard label="Offshore" />
+          </section>
+        );
+      }
+    `,
+  });
+
+  const result = await debugApplyDirectionalTrendEditForTest({
+    projectDir,
+    allowedFiles: ["src/app/components/DepositsBreakdown.tsx"],
+    intent: {
+      kind: "set-directional-trend-colors",
+      summary: "Color only this selected sparkline by direction.",
+      target: "Virtual sparkline",
+      requestedValue: JSON.stringify({
+        upColor: "#22c55e",
+        downColor: "#ef4444",
+        lineOnly: true,
+      }),
+      parameters: {
+        upColor: "#22c55e",
+        downColor: "#ef4444",
+        lineOnly: true,
+      },
+    },
+    selectionTarget: {
+      targetId: "target-5",
+      fingerprint: "path::virtual-card::stroke",
+      route: "/",
+      label: "",
+      summary: "Selected repeated sparkline instance",
+      sourceFilePath: "src/app/components/DepositsBreakdown.tsx",
+      sourceCandidates: [
+        {
+          path: "src/app/components/DepositsBreakdown.tsx",
+          score: 245,
+          reason: "matches repeated sparkline component",
+          matchedTerms: ["deposits", "sparkline", "virtual"],
+        },
+      ],
+      confidence: 0.93,
+      componentName: "Deposits Breakdown",
+      sectionName: "Deposits Breakdown",
+      repeatGroup: "deposit-card",
+      instanceScope: ".deposit-card:nth-of-type(1)",
+      instanceIndex: 1,
+      scopeMode: "instance",
+      visualType: "chart-line",
+      resolvedHandles: [
+        {
+          key: "line-color",
+          label: "Line color",
+          confidence: 0.97,
+          currentValue: "#8b949e",
+        },
+      ],
+      editableCapabilities: [{ key: "line-color", label: "Line color", confidence: 0.97 }],
+      payload: createSelection({
+        nearestFramerName: null,
+        contextTexts: ["Deposits", "$9.80M"],
+        instanceIndex: 1,
+        repeatKey: "deposit-card",
+      }),
+    },
+  });
+
+  assert.ok(result);
+  assert.equal(result?.changedFiles[0]?.path, "src/app/components/DepositsBreakdown.tsx");
+  assert.match(result?.summary || "", /selected instance #1/i);
+  assert.match(result?.changedFiles[0]?.content || "", /<DepositCard label="Virtual"[\s\S]*upTrendColor="#22c55e"/);
+  assert.doesNotMatch(result?.changedFiles[0]?.content || "", /<DepositCard label="Offshore"[\s\S]*upTrendColor="#22c55e"/);
 });

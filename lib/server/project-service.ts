@@ -2629,6 +2629,8 @@ function inferSelectedInstanceLabel(selectionTarget: SelectionTarget | null, con
   const candidates = uniqueStrings(
     [
       selectionTarget.label,
+      selectionTarget.repeatGroup || "",
+      selectionTarget.payload.repeatKey || "",
       ...(selectionTarget.payload.contextTexts || []),
       selectionTarget.sectionName || "",
     ]
@@ -2818,7 +2820,7 @@ async function tryApplyDirectionalTrendEdit(params: {
     if (
       /function buildDirectionalSegments\s*\(/.test(nextContent) &&
       /function DepositCard\s*\(/.test(nextContent) &&
-      (selectedLabel || applyToAllMatching)
+      (selectedLabel || selectedInstanceIndex || applyToAllMatching)
     ) {
       if (!/upTrendColor\?: string;/.test(nextContent)) {
         nextContent = nextContent.replace(
@@ -2934,7 +2936,7 @@ async function tryApplyDirectionalTrendEdit(params: {
       summary: applyToAllMatching
         ? "Updated all matching trend lines with directional colors while keeping the shade logic scoped."
         : appliedScopedPatch
-          ? `Updated the ${selectedLabel} trend line colors without tinting unrelated chart fills.`
+          ? `Updated the ${selectedLabel || `selected instance #${selectedInstanceIndex || 1}`} trend line colors without tinting unrelated chart fills.`
           : "Updated directional trend colors for the resolved chart component.",
       warnings: [],
       changedFiles: [
@@ -2949,6 +2951,15 @@ async function tryApplyDirectionalTrendEdit(params: {
   }
 
   return null;
+}
+
+export async function debugApplyDirectionalTrendEditForTest(params: {
+  projectDir: string;
+  selectionTarget: SelectionTarget | null;
+  intent: EditIntent;
+  allowedFiles: string[];
+}) {
+  return tryApplyDirectionalTrendEdit(params);
 }
 
 async function tryApplyDeterministicEdit(params: {
