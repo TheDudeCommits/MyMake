@@ -469,6 +469,10 @@ export function buildPreviewBridgeScript(projectId: string): string {
       function getReactDebugContext(element) {
         const componentStack = [];
         const sourceHints = [];
+        let filePath = null;
+        let line = null;
+        let column = null;
+        let componentName = null;
         let fiber = getReactFiberNode(element);
         let depth = 0;
 
@@ -477,6 +481,9 @@ export function buildPreviewBridgeScript(projectId: string): string {
           if (name && !/^(ForwardRef|Memo|Anonymous)$/.test(name)) {
             addUniqueTextValue(componentStack, name, 80);
             addUniqueTextValue(sourceHints, name, 80);
+            if (!componentName) {
+              componentName = name;
+            }
           }
 
           const debugSource = fiber?._debugSource || fiber?._debugOwner?._debugSource;
@@ -486,6 +493,13 @@ export function buildPreviewBridgeScript(projectId: string): string {
             const base = fileName.split("/").pop() || fileName;
             addUniqueTextValue(sourceHints, base, 120);
             addUniqueTextValue(sourceHints, base.replace(/\\.[^.]+$/, ""), 120);
+            if (!filePath) {
+              filePath = fileName;
+              line =
+                typeof debugSource.lineNumber === "number" ? debugSource.lineNumber : null;
+              column =
+                typeof debugSource.columnNumber === "number" ? debugSource.columnNumber : null;
+            }
           }
 
           collectReactPropHints(fiber.memoizedProps, sourceHints, 12);
@@ -496,6 +510,10 @@ export function buildPreviewBridgeScript(projectId: string): string {
         return {
           componentStack: componentStack.slice(0, 8),
           sourceHints: sourceHints.slice(0, 12),
+          filePath: filePath,
+          line: line,
+          column: column,
+          componentName: componentName,
         };
       }
 
@@ -607,6 +625,81 @@ export function buildPreviewBridgeScript(projectId: string): string {
         return attributes;
       }
 
+      function buildStyleSnapshot(element, semanticElement) {
+        const representative = findRepresentativeVisualElement(element) || element;
+        const representativeStyle = getComputedStyleSafe(representative);
+        const semanticStyle =
+          representative === semanticElement
+            ? representativeStyle
+            : getComputedStyleSafe(semanticElement);
+        const rect = semanticElement.getBoundingClientRect();
+
+        return {
+          textColor: semanticStyle?.color || null,
+          lineColor:
+            representative.getAttribute("stroke") ||
+            representativeStyle?.stroke ||
+            null,
+          fillColor:
+            representative.getAttribute("fill") ||
+            representativeStyle?.fill ||
+            null,
+          backgroundColor:
+            semanticStyle?.backgroundColor && semanticStyle.backgroundColor !== "rgba(0, 0, 0, 0)"
+              ? semanticStyle.backgroundColor
+              : null,
+          borderRadius: semanticStyle?.borderRadius || null,
+          opacity: semanticStyle?.opacity || representativeStyle?.opacity || null,
+          fontSize: semanticStyle?.fontSize || null,
+          fontWeight: semanticStyle?.fontWeight || null,
+          display: semanticStyle?.display || null,
+          visibility: semanticStyle?.visibility || null,
+          width: Math.round(rect.width) || null,
+          height: Math.round(rect.height) || null,
+          gap: semanticStyle?.gap || null,
+          rowGap: semanticStyle?.rowGap || null,
+          columnGap: semanticStyle?.columnGap || null,
+          padding: semanticStyle?.padding || null,
+          margin: semanticStyle?.margin || null,
+          imageSrc:
+            semanticElement instanceof HTMLImageElement
+              ? semanticElement.currentSrc || semanticElement.src
+              : semanticElement.getAttribute("src"),
+        };
+      }
+
+      function buildProofHandles(element, semanticElement, styleSnapshot) {
+        const handles = [];
+        const add = function (key, label, value, confidence) {
+          if (value === null || value === undefined || value === "") {
+            return;
+          }
+
+          handles.push({
+            key: key,
+            label: label,
+            value: String(value),
+            confidence: confidence,
+          });
+        };
+
+        add("text", "Text", normalizeTextValue(semanticElement.textContent || ""), 0.98);
+        add("line-color", "Line color", styleSnapshot.lineColor, 0.96);
+        add("fill-color", "Fill color", styleSnapshot.fillColor, 0.94);
+        add("background-color", "Background", styleSnapshot.backgroundColor, 0.92);
+        add("radius", "Border radius", styleSnapshot.borderRadius, 0.84);
+        add("visibility", "Visibility", styleSnapshot.visibility || styleSnapshot.display, 0.88);
+        add("image-src", "Image source", styleSnapshot.imageSrc, 0.95);
+        add("width", "Width", styleSnapshot.width, 0.82);
+        add("height", "Height", styleSnapshot.height, 0.82);
+        add("spacing-x", "Horizontal spacing", styleSnapshot.columnGap || styleSnapshot.gap, 0.72);
+        add("spacing-y", "Vertical spacing", styleSnapshot.rowGap || styleSnapshot.gap, 0.72);
+        add("font-size", "Font size", styleSnapshot.fontSize, 0.76);
+        add("opacity", "Opacity", styleSnapshot.opacity, 0.68);
+
+        return handles.slice(0, 12);
+      }
+
       function currentSelectionPayload(element) {
         const semanticElement = normalizeSelectionElement(element);
         const rect = semanticElement.getBoundingClientRect();
@@ -623,6 +716,15 @@ export function buildPreviewBridgeScript(projectId: string): string {
         const contextTexts = getNearbyTextContext(semanticElement);
         const visualType = detectVisualType(element);
         const reactDebug = getReactDebugContext(element);
+        const sourceAnchor = {
+          filePath: reactDebug.filePath || null,
+          line: reactDebug.line || null,
+          column: reactDebug.column || null,
+          componentName: reactDebug.componentName || null,
+          ownerStack: reactDebug.componentStack || [],
+        };
+        const styleSnapshot = buildStyleSnapshot(element, semanticElement);
+        const proofHandles = buildProofHandles(element, semanticElement, styleSnapshot);
         const instanceIndex =
           inferInstanceIndex(scopeSelector) || inferInstanceIndex(scopedSelector) || null;
         const allInstanceSelector =
@@ -671,6 +773,9 @@ export function buildPreviewBridgeScript(projectId: string): string {
           visualType,
           reactComponentStack: reactDebug.componentStack,
           reactSourceHints: reactDebug.sourceHints,
+          sourceAnchor,
+          styleSnapshot,
+          proofHandles,
           boundingBox: toBox(rect),
         };
       }

@@ -20,10 +20,13 @@ import type {
   MakeKitRecord,
   PackageManager,
   ProjectRuntime,
+  ReactSourceAnchor,
   ResolvedHandle,
   SelectionPayload,
   SelectionSourceCandidate,
   SelectionTarget,
+  SourceResolutionMethod,
+  UiOperation,
   ValidationCheckStatus,
 } from "@/lib/types";
 
@@ -52,6 +55,7 @@ const STYLE_FILE_HINTS = [
   "styles/",
   "style.",
 ];
+const GENERIC_REACT_HINTS = new Set(["app", "page", "layout", "root", "index", "main"]);
 
 interface ComponentIndexEntry {
   name: string;
@@ -87,6 +91,8 @@ interface BrandKitFile {
   palette: string[];
   fonts: string[];
   primitives: string[];
+  tokens: string[];
+  typographyScale: string[];
 }
 
 export interface KnowledgeArtifacts {
@@ -132,6 +138,135 @@ function splitKeywords(value: string): string[] {
 
 function unique<T>(values: T[]): T[] {
   return Array.from(new Set(values));
+}
+
+function stripLeadingProjectSegments(value: string): string {
+  const normalized = toPosixPath(value).replace(/^\/+/, "");
+  const projectMarkers = ["src/", "app/", "pages/", "components/", "lib/", "editable/"];
+  for (const marker of projectMarkers) {
+    const index = normalized.toLowerCase().lastIndexOf(marker);
+    if (index >= 0) {
+      return normalized.slice(index);
+    }
+  }
+
+  return normalized;
+}
+
+function findBestPathSuffixMatch(files: string[], requestedPath: string): string | null {
+  if (!requestedPath) {
+    return null;
+  }
+
+  const normalizedRequestedPath = stripLeadingProjectSegments(requestedPath).toLowerCase();
+  const suffixMatches = files
+    .filter((filePath) => {
+      const normalizedFilePath = toPosixPath(filePath).toLowerCase();
+      return (
+        normalizedRequestedPath === normalizedFilePath ||
+        normalizedRequestedPath.endsWith(`/${normalizedFilePath}`) ||
+        normalizedFilePath.endsWith(`/${normalizedRequestedPath}`)
+      );
+    })
+    .sort((left, right) => right.length - left.length);
+
+  if (suffixMatches[0]) {
+    return suffixMatches[0];
+  }
+
+  const basename = path.basename(normalizedRequestedPath);
+  if (!basename) {
+    return null;
+  }
+
+  return (
+    files
+      .filter((filePath) => path.basename(filePath).toLowerCase() === basename)
+      .sort((left, right) => right.length - left.length)[0] || null
+  );
+}
+
+function resolveSelectionSourceAnchor(
+  files: string[],
+  selection: SelectionPayload | null,
+): ReactSourceAnchor | null {
+  const anchor = selection?.sourceAnchor;
+  if (!anchor) {
+    return null;
+  }
+
+  const resolvedFilePath = anchor.filePath ? findBestPathSuffixMatch(files, anchor.filePath) : null;
+  if (!resolvedFilePath && !anchor.ownerStack.length && !anchor.componentName) {
+    return null;
+  }
+
+  return {
+    filePath: resolvedFilePath,
+    line: anchor.line ?? null,
+    column: anchor.column ?? null,
+    componentName: anchor.componentName ?? null,
+    ownerStack: anchor.ownerStack || [],
+  };
+}
+
+function resolveSelectionSourceHintFile(
+  files: string[],
+  selection: SelectionPayload | null,
+): string | null {
+  const hints = [
+    ...(selection?.reactSourceHints || []).map((hint) => ({
+      source: "source-hint" as const,
+      value: hint,
+    })),
+    ...(selection?.reactComponentStack || []).map((hint) => ({
+      source: "component-stack" as const,
+      value: hint,
+    })),
+  ];
+  let bestMatch: { filePath: string; score: number } | null = null;
+
+  for (const hint of hints) {
+    const normalizedHint = normalizeHintValue(hint.value);
+    if (!normalizedHint) {
+      continue;
+    }
+    if (hint.source === "component-stack" && isGenericReactHint(hint.value)) {
+      continue;
+    }
+
+    if (/\.[a-z0-9]+$/i.test(hint.value)) {
+      const exactPathMatch = findBestPathSuffixMatch(files, hint.value);
+      if (exactPathMatch) {
+        return exactPathMatch;
+      }
+    }
+
+    for (const filePath of files) {
+      const normalizedStem = normalizeHintValue(fileStem(filePath));
+      if (
+        normalizedStem !== normalizedHint &&
+        !normalizedStem.includes(normalizedHint) &&
+        !normalizedHint.includes(normalizedStem)
+      ) {
+        continue;
+      }
+
+      let score = normalizedStem === normalizedHint ? 180 : 110;
+      if (filePath.includes("/components/")) {
+        score += 18;
+      }
+      if (!isGenericReactHint(normalizedStem)) {
+        score += 14;
+      }
+      score += Math.min(24, filePath.split("/").length * 4);
+
+      if (!bestMatch || score > bestMatch.score) {
+        bestMatch = { filePath, score };
+      }
+    }
+  }
+
+  return bestMatch?.filePath || null;
 }
 
 function routeFileCandidates(route: string): string[] {
@@ -236,6 +371,20 @@ function extractFonts(content: string): string[] {
       .forEach((font) => fonts.add(font));
   }
   return [...fonts].slice(0, 16);
+}
+
+function extractCssVariableTokens(content: string): string[] {
+  return unique(
+    [...content.matchAll(/--([a-z0-9-]+)\s*:/gi)].map((match) => `--${match[1]}`),
+  ).slice(0, 32);
+}
+
+function extractTypographyScale(content: string): string[] {
+  return unique(
+    [...content.matchAll(/font-size\s*:\s*([^;]+);/gi)]
+      .map((match) => match[1]?.trim() || "")
+      .filter(Boolean),
+  ).slice(0, 24);
 }
 
 function deriveComponentKind(filePath: string): ComponentIndexEntry["kind"] {
@@ -384,6 +533,8 @@ async function deriveBrandKit(projectDir: string): Promise<BrandKitFile> {
   const palette = new Set<string>();
   const fonts = new Set<string>();
   const primitives = new Set<string>();
+  const tokens = new Set<string>();
+  const typographyScale = new Set<string>();
 
   for (const filePath of files) {
     if (!STYLE_FILE_HINTS.some((hint) => filePath.includes(hint)) && !filePath.endsWith(".css")) {
@@ -397,6 +548,8 @@ async function deriveBrandKit(projectDir: string): Promise<BrandKitFile> {
 
     extractHexPalette(content).forEach((item) => palette.add(item));
     extractFonts(content).forEach((font) => fonts.add(font));
+    extractCssVariableTokens(content).forEach((token) => tokens.add(token));
+    extractTypographyScale(content).forEach((value) => typographyScale.add(value));
     ["button", "card", "badge", "input", "modal", "hero", "navbar"]
       .filter((item) => new RegExp(item, "i").test(content))
       .forEach((item) => primitives.add(item));
@@ -407,6 +560,8 @@ async function deriveBrandKit(projectDir: string): Promise<BrandKitFile> {
     palette: [...palette].slice(0, 16),
     fonts: [...fonts].slice(0, 12),
     primitives: [...primitives].slice(0, 12),
+    tokens: [...tokens].slice(0, 24),
+    typographyScale: [...typographyScale].slice(0, 16),
   };
 }
 
@@ -492,7 +647,14 @@ export async function readKnowledgeFiles(projectDir: string): Promise<{
   return {
     projectBrief,
     designRules,
-    brandKit,
+    brandKit: {
+      generatedAt: brandKit.generatedAt,
+      palette: brandKit.palette || [],
+      fonts: brandKit.fonts || [],
+      primitives: brandKit.primitives || [],
+      tokens: brandKit.tokens || [],
+      typographyScale: brandKit.typographyScale || [],
+    },
     componentIndex,
     editMemory,
   };
@@ -532,17 +694,30 @@ function inferEditableCapabilities(selection: SelectionPayload): SelectionTarget
   if (
     selection.editableProperties.includes("fill-color") ||
     Boolean(selection.attributes.fill) ||
-    selection.visualType === "chart-area"
+    selection.visualType === "chart-area" ||
+    Boolean(selection.styleSnapshot?.backgroundColor)
   ) {
     add("fill-color", "Fill color", 0.94);
     add("background", "Background", 0.84);
     add("color", "Colors", 0.82);
   }
 
-  if (["button", "a"].includes(selection.tagName) || /\bbutton\b/i.test(selection.classes.join(" "))) {
+  if (
+    ["button", "a"].includes(selection.tagName) ||
+    /\bbutton\b/i.test(selection.classes.join(" ")) ||
+    Boolean(selection.styleSnapshot?.gap || selection.styleSnapshot?.padding || selection.styleSnapshot?.margin)
+  ) {
     add("spacing", "Spacing", 0.82);
     add("radius", "Radius", 0.74);
     add("color", "Colors", 0.8);
+  }
+
+  if (selection.styleSnapshot?.fontSize || selection.styleSnapshot?.fontWeight) {
+    add("typography", "Typography", 0.84);
+  }
+
+  if (selection.styleSnapshot?.width || selection.styleSnapshot?.height) {
+    add("size", "Size", 0.78);
   }
 
   add("visibility", "Visibility", 0.9);
@@ -615,11 +790,36 @@ function inferResolvedHandles(selection: SelectionPayload): ResolvedHandle[] {
   if (selection.src) {
     add("image", "Image source", 0.95, selection.src);
   }
-  if (selection.editableProperties.includes("spacing")) {
+  if (selection.styleSnapshot?.gap || selection.styleSnapshot?.padding || selection.styleSnapshot?.margin) {
+    add(
+      "spacing",
+      "Spacing",
+      0.82,
+      selection.styleSnapshot.gap ||
+        selection.styleSnapshot.padding ||
+        selection.styleSnapshot.margin ||
+        null,
+    );
+  } else if (selection.editableProperties.includes("spacing")) {
     add("spacing", "Spacing", 0.78);
   }
-  if (selection.editableProperties.includes("radius")) {
+  if (selection.styleSnapshot?.borderRadius) {
+    add("radius", "Border radius", 0.86, selection.styleSnapshot.borderRadius);
+  } else if (selection.editableProperties.includes("radius")) {
     add("radius", "Border radius", 0.74);
+  }
+  if (selection.styleSnapshot?.width) {
+    add("width", "Width", 0.8, `${Math.round(selection.styleSnapshot.width)}px`);
+  }
+  if (selection.styleSnapshot?.height) {
+    add("height", "Height", 0.8, `${Math.round(selection.styleSnapshot.height)}px`);
+  }
+  if (selection.styleSnapshot?.fontSize) {
+    add("font-size", "Font size", 0.82, selection.styleSnapshot.fontSize);
+  }
+
+  for (const handle of selection.proofHandles || []) {
+    add(handle.key, handle.label, handle.confidence, handle.value);
   }
   add("visibility", "Visibility", 0.9);
 
@@ -631,6 +831,10 @@ function normalizeHintValue(value: string): string {
     .toLowerCase()
     .replace(/\.[^.]+$/, "")
     .replace(/[^a-z0-9]+/g, "");
+}
+
+function isGenericReactHint(value: string): boolean {
+  return GENERIC_REACT_HINTS.has(normalizeHintValue(value));
 }
 
 function collectSelectionSearchTerms(selection: SelectionPayload): string[] {
@@ -851,6 +1055,9 @@ function inferConfidenceFromCandidates(
   if (top.reason.includes("React source hint")) {
     confidence += 0.16;
   }
+  if (top.reason.includes("React source anchor")) {
+    confidence += 0.26;
+  }
   if (top.reason.includes("matches multiple target phrases")) {
     confidence += 0.08;
   }
@@ -907,8 +1114,12 @@ export async function buildSelectionTarget(params: {
   const routeCandidates = new Set(routeFileCandidates(params.route));
   const searchTerms = collectSelectionSearchTerms(selection);
   const phrases = collectSelectionPhrases(selection);
+  const resolvedSourceAnchor = resolveSelectionSourceAnchor(files, selection);
+  const sourceHintFilePath = resolveSelectionSourceHintFile(files, selection);
   const seededFiles = unique(
     [
+      resolvedSourceAnchor?.filePath || "",
+      sourceHintFilePath || "",
       ...files.filter((filePath) => routeCandidates.has(filePath)),
       params.currentFilePath || "",
       ...params.componentIndex.components
@@ -922,7 +1133,7 @@ export async function buildSelectionTarget(params: {
     ].filter(Boolean),
   );
   const candidateFiles = unique([...seededFiles, ...files]).slice(0, Math.max(20, seededFiles.length + 8));
-  const sourceCandidates = (
+  const heuristicCandidates = (
     await Promise.all(
       candidateFiles.map(async (filePath) =>
         scoreFileCandidate({
@@ -942,12 +1153,63 @@ export async function buildSelectionTarget(params: {
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
     .slice(0, 5);
+  const sourceCandidates = unique([
+    resolvedSourceAnchor?.filePath || "",
+    sourceHintFilePath || "",
+    ...heuristicCandidates.map((candidate) => candidate.path),
+  ])
+    .map((filePath) => {
+      if (resolvedSourceAnchor?.filePath === filePath) {
+        return {
+          path: filePath,
+          score: 240,
+          reason: "resolved from React source anchor",
+          matchedTerms: unique([
+            resolvedSourceAnchor.componentName || "",
+            ...(resolvedSourceAnchor.ownerStack || []),
+          ]).flatMap((value) => splitKeywords(value)),
+        } satisfies SelectionSourceCandidate;
+      }
+
+      if (sourceHintFilePath === filePath) {
+        return {
+          path: filePath,
+          score: 200,
+          reason: "resolved from React source hints",
+          matchedTerms: unique([
+            ...(selection.reactSourceHints || []),
+            ...(selection.reactComponentStack || []),
+          ]).flatMap((value) => splitKeywords(value)),
+        } satisfies SelectionSourceCandidate;
+      }
+
+      return heuristicCandidates.find((candidate) => candidate.path === filePath) || null;
+    })
+    .filter((candidate): candidate is SelectionSourceCandidate => Boolean(candidate))
+    .slice(0, 5);
 
   const likelySourceFilePath =
-    sourceCandidates[0]?.path || params.currentFilePath || routeFileCandidates(params.route)[0] || null;
+    resolvedSourceAnchor?.filePath ||
+    sourceHintFilePath ||
+    sourceCandidates[0]?.path ||
+    params.currentFilePath ||
+    routeFileCandidates(params.route)[0] ||
+    null;
+  const resolutionMethod: SourceResolutionMethod = resolvedSourceAnchor?.filePath
+    ? "react-source-anchor"
+    : sourceHintFilePath
+      ? "react-source-hints"
+      : sourceCandidates[0]?.path
+        ? "heuristic-file-score"
+        : params.currentFilePath
+          ? "active-file-fallback"
+          : likelySourceFilePath
+            ? "route-fallback"
+            : "unknown";
 
   const componentName =
     params.componentIndex.components.find((entry) => entry.filePath === likelySourceFilePath)?.name ||
+    resolvedSourceAnchor?.componentName ||
     (selection.nearestFramerName ? humanizeIdentifier(selection.nearestFramerName) : humanizeIdentifier(selection.tagName));
   const fingerprint = buildSelectionFingerprint(selection);
   const confidence = inferConfidenceFromCandidates(sourceCandidates, selection);
@@ -986,6 +1248,10 @@ export async function buildSelectionTarget(params: {
     instanceIndex: selection.instanceIndex || null,
     scopeMode,
     visualType: selection.visualType || null,
+    sourceAnchor: resolvedSourceAnchor,
+    resolutionMethod,
+    styleSnapshot: selection.styleSnapshot || null,
+    proofHandles: selection.proofHandles || [],
     resolvedHandles: inferResolvedHandles(selection),
     editableCapabilities: inferEditableCapabilities(selection),
     payload: selection,
@@ -997,10 +1263,27 @@ function excerptContent(params: {
   prompt: string;
   selection: SelectionPayload | null;
   filePath: string;
+  sourceAnchor?: ReactSourceAnchor | null;
 }): string {
   const { content, prompt, selection } = params;
   if (content.length <= 18_000) {
     return content;
+  }
+
+  if (
+    params.sourceAnchor?.filePath &&
+    toPosixPath(params.sourceAnchor.filePath) === toPosixPath(params.filePath) &&
+    params.sourceAnchor.line &&
+    params.sourceAnchor.line > 0
+  ) {
+    const lines = content.split("\n");
+    const anchorLineIndex = Math.max(0, Math.min(lines.length - 1, params.sourceAnchor.line - 1));
+    const start = Math.max(0, anchorLineIndex - 90);
+    const end = Math.min(lines.length, anchorLineIndex + 150);
+    return [
+      `/* MYMAKE SOURCE ANCHOR ${params.filePath}:${params.sourceAnchor.line}:${params.sourceAnchor.column || 1} */`,
+      ...lines.slice(start, end),
+    ].join("\n");
   }
 
   const anchors = new Set<number>([0]);
@@ -1209,11 +1492,11 @@ export async function collectContextGraph(params: {
 
   const orderedFiles = [...fileScores.entries()]
     .sort((left, right) => right[1].score - left[1].score || left[0].localeCompare(right[0]))
-    .slice(0, params.selectionTarget ? 8 : 12);
+    .slice(0, params.selectionTarget ? 5 : 8);
 
   const contextFiles: ContextFile[] = [];
   let totalChars = 0;
-  const maxChars = 92_000;
+  const maxChars = params.selectionTarget ? 36_000 : 52_000;
 
   for (const [filePath, meta] of orderedFiles) {
     const content = await readTextFile(params.projectDir, filePath);
@@ -1226,6 +1509,7 @@ export async function collectContextGraph(params: {
       prompt: params.prompt,
       selection: params.selection,
       filePath,
+      sourceAnchor: params.selectionTarget?.sourceAnchor || null,
     });
 
     if (contextFiles.length && totalChars + prepared.length > maxChars) {
@@ -1301,6 +1585,57 @@ function normalizeColorToken(raw: string | null): string | null {
   }
 
   return COLOR_NAME_TO_HEX[raw.toLowerCase()] || raw.toLowerCase();
+}
+
+function extractMeasurementValue(prompt: string): string | null {
+  const explicitMatch = prompt.match(/\b(\d+(?:\.\d+)?(?:px|rem|em|%))\b/i);
+  if (explicitMatch?.[1]) {
+    return explicitMatch[1];
+  }
+
+  const rawNumber = prompt.match(/\b(\d+(?:\.\d+)?)\b/);
+  if (rawNumber?.[1]) {
+    return `${rawNumber[1]}px`;
+  }
+
+  return null;
+}
+
+function inferAxisFromPrompt(prompt: string): "all" | "x" | "y" | null {
+  const normalized = prompt.toLowerCase();
+  if (/\b(horizontal|x-axis|left and right|left-right)\b/.test(normalized)) {
+    return "x";
+  }
+  if (/\b(vertical|y-axis|top and bottom|top-bottom)\b/.test(normalized)) {
+    return "y";
+  }
+  return "all";
+}
+
+function extractTypographyInstruction(prompt: string): {
+  property: "font-size" | "font-weight";
+  value: string;
+} | null {
+  const normalized = prompt.toLowerCase();
+  if (/\bfont size|text size|typography|headline size|copy size\b/.test(normalized)) {
+    const measurement = extractMeasurementValue(prompt);
+    if (measurement) {
+      return {
+        property: "font-size",
+        value: measurement,
+      };
+    }
+  }
+
+  const weightMatch = prompt.match(/\b(400|500|600|700|800|bold|semibold|medium|regular)\b/i);
+  if (/\bfont weight|weight|bold|semibold|medium|regular\b/.test(normalized) && weightMatch?.[1]) {
+    return {
+      property: "font-weight",
+      value: weightMatch[1],
+    };
+  }
+
+  return null;
 }
 
 function extractDirectionalTrendInstruction(prompt: string): {
@@ -1397,13 +1732,19 @@ function extractChartBarNormalizationInstruction(prompt: string): {
 function resolveEditIntent(params: {
   prompt: string;
   target: SelectionTarget | null;
-  inspectorAction?: { kind: string; value?: string | null } | null;
+  inspectorAction?: { kind: string; value?: string | null; axis?: "all" | "x" | "y" | null } | null;
 }): EditIntent {
   if (params.inspectorAction) {
     return {
       kind: params.inspectorAction.kind as EditIntentKind,
       confidence: 0.99,
-      requestedValue: params.inspectorAction.value || null,
+      requestedValue:
+        params.inspectorAction.kind === "set-spacing"
+          ? JSON.stringify({
+              value: params.inspectorAction.value || null,
+              axis: params.inspectorAction.axis || "all",
+            })
+          : params.inspectorAction.value || null,
       summary: `Inspector action: ${params.inspectorAction.kind}`,
     };
   }
@@ -1483,6 +1824,8 @@ function resolveEditIntent(params: {
   }
 
   const requestedColor = extractColorValue(prompt);
+  const requestedMeasurement = extractMeasurementValue(prompt);
+  const typographyInstruction = extractTypographyInstruction(prompt);
   if (
     requestedColor &&
     /\b(line|stroke|sparkline|chart line|trend line)\b/.test(normalized) &&
@@ -1525,6 +1868,7 @@ function resolveEditIntent(params: {
     return {
       kind: "set-radius",
       confidence: 0.8,
+      requestedValue: requestedMeasurement,
       summary: "Adjust border radius on the selected target.",
     };
   }
@@ -1536,7 +1880,36 @@ function resolveEditIntent(params: {
     return {
       kind: "set-spacing",
       confidence: 0.8,
+      requestedValue: JSON.stringify({
+        value: requestedMeasurement,
+        axis: inferAxisFromPrompt(prompt),
+      }),
       summary: "Adjust spacing on the selected target.",
+    };
+  }
+
+  if (
+    typographyInstruction &&
+    Boolean(target?.editableCapabilities.some((item) => item.key === "typography"))
+  ) {
+    return {
+      kind: "set-size",
+      confidence: 0.78,
+      requestedValue: JSON.stringify(typographyInstruction),
+      summary: "Adjust typography on the selected target.",
+    };
+  }
+
+  if (
+    /\b(image|photo|illustration|avatar|logo)\b/.test(normalized) &&
+    /\b(change|replace|swap|update)\b/.test(normalized) &&
+    Boolean(target?.editableCapabilities.some((item) => item.key === "image"))
+  ) {
+    return {
+      kind: "swap-image",
+      confidence: 0.82,
+      requestedValue: target?.styleSnapshot?.imageSrc || target?.payload.src || null,
+      summary: "Swap the selected image source.",
     };
   }
 
@@ -1545,6 +1918,187 @@ function resolveEditIntent(params: {
     confidence: target ? Math.max(0.42, target.confidence - 0.08) : 0.22,
     summary: "This edit likely needs a constrained AI pass.",
   };
+}
+
+function parseJsonObject<T>(value: string | null | undefined): T | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+}
+
+function stripWrappedQuotes(value: string): string {
+  return value.trim().replace(/^["“'`]+|["”'`]+$/g, "").trim();
+}
+
+function extractRequestedReplacementText(
+  prompt: string,
+  selectionTarget: SelectionTarget | null,
+): string | null {
+  const quotedPatterns = [
+    /\b(?:to|with)\b\s+["“'`]?(.+?)["”'`]?$/i,
+    /\bchange\s+this(?:\s+selected)?\s+text\s+to\s+["“'`]?(.+?)["”'`]?$/i,
+  ];
+
+  for (const pattern of quotedPatterns) {
+    const match = prompt.trim().match(pattern);
+    const replacement = stripWrappedQuotes(match?.[1] || "");
+    if (replacement) {
+      return replacement;
+    }
+  }
+
+  const currentText = selectionTarget?.payload.textContent?.trim();
+  if (!currentText) {
+    return null;
+  }
+
+  const normalizedPrompt = prompt.toLowerCase();
+  if (!normalizedPrompt.includes(currentText.toLowerCase())) {
+    return null;
+  }
+
+  const implicitMatch = prompt.match(/\b(?:to|with)\b\s+(.+?)$/i);
+  return stripWrappedQuotes(implicitMatch?.[1] || "") || null;
+}
+
+function buildUiOperations(params: {
+  prompt: string;
+  intent: EditIntent;
+  selectionTarget: SelectionTarget | null;
+  inspectorAction?: { kind: string; value?: string | null; axis?: "all" | "x" | "y" | null } | null;
+}): UiOperation[] {
+  const targetFingerprint = params.selectionTarget?.fingerprint || null;
+  const sourceFileHint = params.selectionTarget?.sourceFilePath || null;
+  const scope = params.selectionTarget?.scopeMode || "instance";
+  const operations: UiOperation[] = [];
+  const push = (operation: Omit<UiOperation, "id" | "scope" | "targetFingerprint" | "sourceFileHint">) => {
+    operations.push({
+      id: createHash("sha1")
+        .update(
+          JSON.stringify({
+            kind: operation.kind,
+            property: operation.property,
+            value: operation.value,
+            summary: operation.summary,
+            targetFingerprint,
+            scope,
+          }),
+        )
+        .digest("hex")
+        .slice(0, 12),
+      scope,
+      targetFingerprint,
+      sourceFileHint,
+      ...operation,
+    });
+  };
+
+  if (params.intent.kind === "replace-text") {
+    push({
+      kind: "setText",
+      property: "text",
+      value:
+        extractRequestedReplacementText(params.prompt, params.selectionTarget) ||
+        params.intent.requestedValue ||
+        null,
+      axis: null,
+      summary: params.intent.summary,
+    });
+  }
+
+  if (
+    ["set-line-color", "set-fill-color", "set-background-color"].includes(params.intent.kind)
+  ) {
+    push({
+      kind: "setColor",
+      property:
+        params.intent.kind === "set-line-color"
+          ? "line-color"
+          : params.intent.kind === "set-fill-color"
+            ? "fill-color"
+            : "background-color",
+      value: params.intent.requestedValue || null,
+      axis: null,
+      summary: params.intent.summary,
+    });
+  }
+
+  if (params.intent.kind === "set-spacing") {
+    const spacingInstruction = parseJsonObject<{ value?: string | null; axis?: "all" | "x" | "y" | null }>(
+      params.intent.requestedValue,
+    );
+    push({
+      kind: "setSpacing",
+      property: "spacing",
+      value: spacingInstruction?.value || params.intent.requestedValue || null,
+      axis: spacingInstruction?.axis || params.inspectorAction?.axis || "all",
+      summary: params.intent.summary,
+    });
+  }
+
+  if (params.intent.kind === "set-radius") {
+    push({
+      kind: "setRadius",
+      property: "radius",
+      value: params.intent.requestedValue || null,
+      axis: null,
+      summary: params.intent.summary,
+    });
+  }
+
+  if (params.intent.kind === "set-visibility") {
+    push({
+      kind: "setVisibility",
+      property: "visibility",
+      value: params.intent.requestedValue || "hidden",
+      axis: null,
+      summary: params.intent.summary,
+    });
+  }
+
+  if (params.intent.kind === "swap-image") {
+    push({
+      kind: "swapImage",
+      property: "image-src",
+      value: params.intent.requestedValue || null,
+      axis: null,
+      summary: params.intent.summary,
+    });
+  }
+
+  if (params.intent.kind === "set-size") {
+    const typographyInstruction = parseJsonObject<{ property?: string; value?: string | null }>(
+      params.intent.requestedValue,
+    );
+    push({
+      kind: "setTypography",
+      property: typographyInstruction?.property || "font-size",
+      value: typographyInstruction?.value || params.intent.requestedValue || null,
+      axis: null,
+      summary: params.intent.summary,
+    });
+  }
+
+  if (params.selectionTarget?.scopeMode === "all-matching" && params.intent.kind === "replace-text") {
+    push({
+      kind: "updateRepeatedItem",
+      property: "text",
+      value:
+        operations.find((operation) => operation.kind === "setText")?.value ||
+        params.intent.requestedValue ||
+        null,
+      axis: null,
+      summary: "Update all matching repeated items within the selected scope.",
+    });
+  }
+
+  return operations;
 }
 
 export function inferEditMode(params: {
@@ -1594,7 +2148,7 @@ export function buildEditPlan(params: {
   selectionTarget: SelectionTarget | null;
   contextGraph: ContextGraphResult;
   hasStaticEditableSupport: boolean;
-  inspectorAction?: { kind: string; value?: string | null } | null;
+  inspectorAction?: { kind: string; value?: string | null; axis?: "all" | "x" | "y" | null } | null;
 }): EditPlan {
   const resolvedEditMode =
     params.editMode ||
@@ -1606,6 +2160,12 @@ export function buildEditPlan(params: {
   const intent = resolveEditIntent({
     prompt: params.prompt,
     target: params.selectionTarget,
+    inspectorAction: params.inspectorAction,
+  });
+  const uiOperations = buildUiOperations({
+    prompt: params.prompt,
+    intent,
+    selectionTarget: params.selectionTarget,
     inspectorAction: params.inspectorAction,
   });
   const isLargeActiveFile = Boolean(params.currentFileContent && params.currentFileContent.length > 120_000);
@@ -1668,6 +2228,7 @@ export function buildEditPlan(params: {
     strategy,
     lane,
     intent,
+    uiOperations,
     risk,
     candidateFiles: params.contextGraph.candidateFiles.slice(0, resolvedEditMode === "creative" ? 8 : 5),
     allowedFiles,
@@ -1695,9 +2256,34 @@ export function buildDesignValidation(params: {
   const introducedColors = unique(
     params.changedFiles.flatMap((file) => extractHexPalette(file.content)),
   );
+  const introducedTokens = unique(
+    params.changedFiles.flatMap((file) => extractCssVariableTokens(file.content)),
+  );
+  const introducedTypeScale = unique(
+    params.changedFiles.flatMap((file) => extractTypographyScale(file.content)),
+  );
 
   if (params.editMode !== "creative" && introducedColors.length > Math.max(8, params.brandKit.palette.length + 2)) {
     warnings.push("The edit introduced a broader color spread than the existing brand kit suggests.");
+  }
+
+  if (
+    params.editMode !== "creative" &&
+    params.brandKit.tokens.length &&
+    introducedColors.length > 0 &&
+    introducedTokens.length === 0
+  ) {
+    warnings.push("The edit introduced raw color values without reusing the project's existing CSS variables.");
+  }
+
+  if (
+    params.editMode !== "creative" &&
+    params.brandKit.typographyScale.length &&
+    introducedTypeScale.some(
+      (value) => !params.brandKit.typographyScale.includes(value),
+    )
+  ) {
+    warnings.push("The edit introduced typography sizes outside the existing project scale.");
   }
 
   if (

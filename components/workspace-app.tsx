@@ -324,6 +324,41 @@ function normalizeColorForInput(value: string | null | undefined): string {
   return "#ffffff";
 }
 
+function normalizeInspectorValue(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  return String(value).trim();
+}
+
+function resolvedHandleValue(target: SelectionTarget | null, key: string): string | null {
+  return (
+    target?.proofHandles.find((handle) => handle.key === key)?.value ||
+    target?.resolvedHandles.find((handle) => handle.key === key)?.currentValue ||
+    null
+  );
+}
+
+function selectionResolutionLabel(
+  method: SelectionTarget["resolutionMethod"] | null | undefined,
+): string {
+  switch (method) {
+    case "react-source-anchor":
+      return "React source anchor";
+    case "react-source-hints":
+      return "React source hints";
+    case "heuristic-file-score":
+      return "Heuristic match";
+    case "active-file-fallback":
+      return "Active file fallback";
+    case "route-fallback":
+      return "Route fallback";
+    default:
+      return "Pending";
+  }
+}
+
 function inferPlannedLane(selection: SelectionPayload | null, prompt: string): string {
   const normalized = prompt.toLowerCase();
   if (
@@ -1321,6 +1356,11 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const [inspectorTextValue, setInspectorTextValue] = useState("");
   const [inspectorLineColor, setInspectorLineColor] = useState("#ffffff");
   const [inspectorFillColor, setInspectorFillColor] = useState("#ffffff");
+  const [inspectorSpacingXValue, setInspectorSpacingXValue] = useState("");
+  const [inspectorSpacingYValue, setInspectorSpacingYValue] = useState("");
+  const [inspectorRadiusValue, setInspectorRadiusValue] = useState("");
+  const [inspectorFontSizeValue, setInspectorFontSizeValue] = useState("");
+  const [inspectorImageValue, setInspectorImageValue] = useState("");
   const [currentRoute, setCurrentRoute] = useState("/");
   const [prompt, setPrompt] = useState("");
   const [editorFilePath, setEditorFilePath] = useState<string | null>(
@@ -1402,18 +1442,80 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     () => inferPlannedLane(effectiveSelectedElement, prompt),
     [effectiveSelectedElement, prompt],
   );
+  const inspectorCapabilityKeys = useMemo(
+    () =>
+      new Set([
+        ...(selectedElement?.editableProperties || []),
+        ...(resolvedSelectionTarget?.editableCapabilities || []).map((item) => item.key),
+      ]),
+    [resolvedSelectionTarget, selectedElement],
+  );
+  const resolvedProofHandles = useMemo(
+    () =>
+      (resolvedSelectionTarget?.proofHandles || [])
+        .filter((handle) => Boolean(handle.value))
+        .slice(0, 6),
+    [resolvedSelectionTarget],
+  );
 
   useEffect(() => {
-    setInspectorTextValue(selectedElement?.textContent || "");
-    setInspectorLineColor(normalizeColorForInput(selectedElement?.attributes?.stroke));
-    setInspectorFillColor(
+    setInspectorTextValue(
+      normalizeInspectorValue(resolvedHandleValue(resolvedSelectionTarget, "text")) ||
+        selectedElement?.textContent ||
+        "",
+    );
+    setInspectorLineColor(
       normalizeColorForInput(
-        selectedElement?.attributes?.fill && selectedElement.attributes.fill !== "none"
-          ? selectedElement.attributes.fill
-          : selectedElement?.attributes?.["background-color"],
+        resolvedHandleValue(resolvedSelectionTarget, "line-color") ||
+          resolvedSelectionTarget?.styleSnapshot?.lineColor ||
+          selectedElement?.attributes?.stroke,
       ),
     );
-  }, [selectedElement]);
+    setInspectorFillColor(
+      normalizeColorForInput(
+        resolvedHandleValue(resolvedSelectionTarget, "fill-color") ||
+          resolvedHandleValue(resolvedSelectionTarget, "background-color") ||
+          resolvedSelectionTarget?.styleSnapshot?.fillColor ||
+          resolvedSelectionTarget?.styleSnapshot?.backgroundColor ||
+          (selectedElement?.attributes?.fill && selectedElement.attributes.fill !== "none"
+            ? selectedElement.attributes.fill
+            : selectedElement?.attributes?.["background-color"]),
+      ),
+    );
+    setInspectorSpacingXValue(
+      normalizeInspectorValue(
+        resolvedHandleValue(resolvedSelectionTarget, "spacing-x") ||
+          resolvedSelectionTarget?.styleSnapshot?.columnGap ||
+          resolvedSelectionTarget?.styleSnapshot?.gap,
+      ),
+    );
+    setInspectorSpacingYValue(
+      normalizeInspectorValue(
+        resolvedHandleValue(resolvedSelectionTarget, "spacing-y") ||
+          resolvedSelectionTarget?.styleSnapshot?.rowGap ||
+          resolvedSelectionTarget?.styleSnapshot?.gap,
+      ),
+    );
+    setInspectorRadiusValue(
+      normalizeInspectorValue(
+        resolvedHandleValue(resolvedSelectionTarget, "radius") ||
+          resolvedSelectionTarget?.styleSnapshot?.borderRadius,
+      ),
+    );
+    setInspectorFontSizeValue(
+      normalizeInspectorValue(
+        resolvedHandleValue(resolvedSelectionTarget, "font-size") ||
+          resolvedSelectionTarget?.styleSnapshot?.fontSize,
+      ),
+    );
+    setInspectorImageValue(
+      normalizeInspectorValue(
+        resolvedHandleValue(resolvedSelectionTarget, "image-src") ||
+          resolvedSelectionTarget?.styleSnapshot?.imageSrc ||
+          selectedElement?.src,
+      ),
+    );
+  }, [resolvedSelectionTarget, selectedElement]);
   const hasUnsavedEdits = Boolean(editorFilePath && editorContent !== editorBaselineContent);
   const previewIdentity = currentProject
     ? `${currentProject.project.id}:${currentProject.preview.instanceId ?? "cold"}`
@@ -2457,6 +2559,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
       | "set-visibility"
       | "swap-image";
     value?: string | null;
+    axis?: "all" | "x" | "y" | null;
     promptOverride: string;
   }) {
     if (!currentProject?.project.currentRevisionId || !effectiveSelectedElement) {
@@ -2487,6 +2590,7 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
           inspectorAction: {
             kind: action.kind,
             value: action.value || null,
+            axis: action.axis || null,
           },
         }),
       });
@@ -3184,6 +3288,19 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                           ? `${resolvedSelectionTarget.componentName || "Unknown component"} • ${selectionScopeLabel(resolvedSelectionTarget.scopeMode)}`
                           : "MyMake is mapping this live layer to the most likely code component and file."}
                       </p>
+                      {resolvedSelectionTarget ? (
+                        <div className="mt-2 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                          <span className="rounded-full border border-white/[0.08] bg-[#1f2023] px-2 py-1 text-slate-300">
+                            {selectionResolutionLabel(resolvedSelectionTarget.resolutionMethod)}
+                          </span>
+                          {resolvedSelectionTarget.sourceAnchor?.filePath &&
+                          resolvedSelectionTarget.sourceAnchor?.line ? (
+                            <span className="rounded-full border border-white/[0.08] bg-[#1f2023] px-2 py-1 text-slate-300">
+                              {`${resolvedSelectionTarget.sourceAnchor.filePath}:${resolvedSelectionTarget.sourceAnchor.line}`}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
                       {resolvedSelectionTarget?.sourceCandidates?.length ? (
                         <div className="mt-2 flex flex-wrap gap-2">
                           {resolvedSelectionTarget.sourceCandidates.slice(0, 3).map((candidate) => (
@@ -3192,6 +3309,18 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                               className="rounded-full border border-white/[0.08] bg-[#1f2023] px-2 py-1 text-[10px] text-slate-400"
                             >
                               {candidate.path}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {resolvedProofHandles.length ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {resolvedProofHandles.map((handle) => (
+                            <span
+                              key={`${handle.key}-${handle.value}`}
+                              className="rounded-full border border-white/[0.08] bg-[#1f2023] px-2 py-1 text-[10px] text-slate-300"
+                            >
+                              {`${handle.label}: ${handle.value}`}
                             </span>
                           ))}
                         </div>
@@ -3219,11 +3348,18 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                         </span>
                       </div>
 
-                      {selectedElement.textContent ? (
+                      {inspectorCapabilityKeys.has("text") || Boolean(inspectorTextValue.trim()) ? (
                         <div className="space-y-2">
-                          <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
-                            Text
-                          </label>
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                              Text
+                            </label>
+                            {resolvedHandleValue(resolvedSelectionTarget, "text") ? (
+                              <span className="text-[10px] text-slate-500">
+                                {resolvedHandleValue(resolvedSelectionTarget, "text")}
+                              </span>
+                            ) : null}
+                          </div>
                           <input
                             className="h-9 w-full rounded-[10px] border border-white/[0.08] bg-[#1f2023] px-3 text-sm text-white outline-none placeholder:text-slate-500"
                             value={inspectorTextValue}
@@ -3246,11 +3382,18 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                         </div>
                       ) : null}
 
-                      {selectedElement.editableProperties.includes("line-color") ? (
+                      {inspectorCapabilityKeys.has("line-color") ? (
                         <div className="space-y-2">
-                          <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
-                            Line color
-                          </label>
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                              Line color
+                            </label>
+                            {resolvedHandleValue(resolvedSelectionTarget, "line-color") ? (
+                              <span className="text-[10px] text-slate-500">
+                                {resolvedHandleValue(resolvedSelectionTarget, "line-color")}
+                              </span>
+                            ) : null}
+                          </div>
                           <div className="flex items-center gap-2">
                             <input
                               className="h-9 w-10 rounded-[10px] border border-white/[0.08] bg-transparent"
@@ -3276,11 +3419,22 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                         </div>
                       ) : null}
 
-                      {selectedElement.editableProperties.includes("fill-color") ? (
+                      {inspectorCapabilityKeys.has("fill-color") ||
+                      inspectorCapabilityKeys.has("background") ||
+                      Boolean(resolvedHandleValue(resolvedSelectionTarget, "background-color")) ? (
                         <div className="space-y-2">
-                          <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
-                            Fill or background
-                          </label>
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                              Fill or background
+                            </label>
+                            {resolvedHandleValue(resolvedSelectionTarget, "fill-color") ||
+                            resolvedHandleValue(resolvedSelectionTarget, "background-color") ? (
+                              <span className="text-[10px] text-slate-500">
+                                {resolvedHandleValue(resolvedSelectionTarget, "fill-color") ||
+                                  resolvedHandleValue(resolvedSelectionTarget, "background-color")}
+                              </span>
+                            ) : null}
+                          </div>
                           <div className="flex items-center gap-2">
                             <input
                               className="h-9 w-10 rounded-[10px] border border-white/[0.08] bg-transparent"
@@ -3309,6 +3463,177 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                               Apply fill
                             </button>
                           </div>
+                        </div>
+                      ) : null}
+
+                      {inspectorCapabilityKeys.has("spacing") ? (
+                        <div className="space-y-2">
+                          <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                            Spacing
+                          </label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-2 rounded-[10px] border border-white/[0.08] bg-[#1f2023] p-2">
+                              <span className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                                Horizontal
+                              </span>
+                              <input
+                                className="h-9 w-full rounded-[10px] border border-white/[0.08] bg-[#262628] px-3 text-sm text-white outline-none placeholder:text-slate-500"
+                                value={inspectorSpacingXValue}
+                                onChange={(event) => setInspectorSpacingXValue(event.target.value)}
+                                placeholder="16px"
+                              />
+                              <button
+                                className="w-full rounded-[10px] border border-white/[0.08] bg-[#31323a] px-3 py-2 text-xs font-medium text-white transition hover:bg-[#3a3c46]"
+                                type="button"
+                                disabled={!inspectorSpacingXValue.trim() || isRunningAi}
+                                onClick={() =>
+                                  void handleInspectorAction({
+                                    kind: "set-spacing",
+                                    axis: "x",
+                                    value: inspectorSpacingXValue,
+                                    promptOverride: `Change only the horizontal spacing on this selected element to ${inspectorSpacingXValue}.`,
+                                  })
+                                }
+                              >
+                                Apply X spacing
+                              </button>
+                            </div>
+                            <div className="space-y-2 rounded-[10px] border border-white/[0.08] bg-[#1f2023] p-2">
+                              <span className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                                Vertical
+                              </span>
+                              <input
+                                className="h-9 w-full rounded-[10px] border border-white/[0.08] bg-[#262628] px-3 text-sm text-white outline-none placeholder:text-slate-500"
+                                value={inspectorSpacingYValue}
+                                onChange={(event) => setInspectorSpacingYValue(event.target.value)}
+                                placeholder="16px"
+                              />
+                              <button
+                                className="w-full rounded-[10px] border border-white/[0.08] bg-[#31323a] px-3 py-2 text-xs font-medium text-white transition hover:bg-[#3a3c46]"
+                                type="button"
+                                disabled={!inspectorSpacingYValue.trim() || isRunningAi}
+                                onClick={() =>
+                                  void handleInspectorAction({
+                                    kind: "set-spacing",
+                                    axis: "y",
+                                    value: inspectorSpacingYValue,
+                                    promptOverride: `Change only the vertical spacing on this selected element to ${inspectorSpacingYValue}.`,
+                                  })
+                                }
+                              >
+                                Apply Y spacing
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {inspectorCapabilityKeys.has("radius") ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                              Border radius
+                            </label>
+                            {resolvedHandleValue(resolvedSelectionTarget, "radius") ? (
+                              <span className="text-[10px] text-slate-500">
+                                {resolvedHandleValue(resolvedSelectionTarget, "radius")}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              className="h-9 flex-1 rounded-[10px] border border-white/[0.08] bg-[#1f2023] px-3 text-sm text-white outline-none placeholder:text-slate-500"
+                              value={inspectorRadiusValue}
+                              onChange={(event) => setInspectorRadiusValue(event.target.value)}
+                              placeholder="20px"
+                            />
+                            <button
+                              className="rounded-[10px] border border-white/[0.08] bg-[#31323a] px-3 py-2 text-xs font-medium text-white transition hover:bg-[#3a3c46]"
+                              type="button"
+                              disabled={!inspectorRadiusValue.trim() || isRunningAi}
+                              onClick={() =>
+                                void handleInspectorAction({
+                                  kind: "set-radius",
+                                  value: inspectorRadiusValue,
+                                  promptOverride: `Set only the selected border radius to ${inspectorRadiusValue}.`,
+                                })
+                              }
+                            >
+                              Apply radius
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {inspectorCapabilityKeys.has("typography") ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                              Typography size
+                            </label>
+                            {resolvedHandleValue(resolvedSelectionTarget, "font-size") ? (
+                              <span className="text-[10px] text-slate-500">
+                                {resolvedHandleValue(resolvedSelectionTarget, "font-size")}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              className="h-9 flex-1 rounded-[10px] border border-white/[0.08] bg-[#1f2023] px-3 text-sm text-white outline-none placeholder:text-slate-500"
+                              value={inspectorFontSizeValue}
+                              onChange={(event) => setInspectorFontSizeValue(event.target.value)}
+                              placeholder="18px"
+                            />
+                            <button
+                              className="rounded-[10px] border border-white/[0.08] bg-[#31323a] px-3 py-2 text-xs font-medium text-white transition hover:bg-[#3a3c46]"
+                              type="button"
+                              disabled={!inspectorFontSizeValue.trim() || isRunningAi}
+                              onClick={() =>
+                                void handleInspectorAction({
+                                  kind: "set-size",
+                                  value: inspectorFontSizeValue,
+                                  promptOverride: `Set only the selected font size to ${inspectorFontSizeValue}.`,
+                                })
+                              }
+                            >
+                              Apply type size
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {inspectorCapabilityKeys.has("image") || Boolean(inspectorImageValue) ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="block text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                              Image source
+                            </label>
+                            {resolvedHandleValue(resolvedSelectionTarget, "image-src") ? (
+                              <span className="max-w-[12rem] truncate text-[10px] text-slate-500">
+                                {resolvedHandleValue(resolvedSelectionTarget, "image-src")}
+                              </span>
+                            ) : null}
+                          </div>
+                          <input
+                            className="h-9 w-full rounded-[10px] border border-white/[0.08] bg-[#1f2023] px-3 text-sm text-white outline-none placeholder:text-slate-500"
+                            value={inspectorImageValue}
+                            onChange={(event) => setInspectorImageValue(event.target.value)}
+                            placeholder="/images/hero.jpg"
+                          />
+                          <button
+                            className="w-full rounded-[10px] border border-white/[0.08] bg-[#31323a] px-3 py-2 text-xs font-medium text-white transition hover:bg-[#3a3c46]"
+                            type="button"
+                            disabled={!inspectorImageValue.trim() || isRunningAi}
+                            onClick={() =>
+                              void handleInspectorAction({
+                                kind: "swap-image",
+                                value: inspectorImageValue,
+                                promptOverride: `Replace only the selected image source with ${inspectorImageValue}.`,
+                              })
+                            }
+                          >
+                            Apply image swap
+                          </button>
                         </div>
                       ) : null}
 

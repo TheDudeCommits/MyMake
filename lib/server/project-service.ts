@@ -49,6 +49,7 @@ import {
 } from "@/lib/server/path-utils";
 import {
   ensurePreviewRunner,
+  getPreviewTargetUrl,
   reclaimProjectInstallStorage,
   getPreviewRunnerInfo,
   restartPreviewRunner,
@@ -110,6 +111,7 @@ import type {
   SelectionPayload,
   SelectionTarget,
   TargetValidationResult,
+  UiOperation,
   ValidationResultRecord,
 } from "@/lib/types";
 
@@ -2752,6 +2754,100 @@ function replaceStyleValueWithKeywords(params: {
   return null;
 }
 
+function replaceNumericValueWithKeywords(params: {
+  content: string;
+  keywords: string[];
+  currentValue?: string | null;
+  nextValue: string;
+}): string | null {
+  const normalizedCurrentValue = params.currentValue?.trim() || null;
+  for (const keyword of params.keywords) {
+    if (normalizedCurrentValue) {
+      const currentValuePattern = escapeRegExp(normalizedCurrentValue);
+      const scopedPatterns = [
+        new RegExp(`(${keyword}\\s*:\\s*["']?)${currentValuePattern}(["']?)`, "i"),
+        new RegExp(`(${keyword}\\s*=\\s*\\{?["']?)${currentValuePattern}(["']?\\}?)`, "i"),
+        new RegExp(`(${keyword}\\s*:\\s*)(\\d+(?:\\.\\d+)?(?:px|rem|em|%)?)`, "i"),
+      ];
+      for (const pattern of scopedPatterns) {
+        if (pattern.test(params.content)) {
+          return params.content.replace(pattern, `$1${params.nextValue}$2`);
+        }
+      }
+    }
+
+    const genericPatterns = [
+      new RegExp(`(${keyword}\\s*:\\s*["']?)(\\d+(?:\\.\\d+)?(?:px|rem|em|%)?)(["']?)`, "i"),
+      new RegExp(`(${keyword}\\s*=\\s*\\{?["']?)(\\d+(?:\\.\\d+)?(?:px|rem|em|%)?)(["']?\\}?)`, "i"),
+      new RegExp(`(${keyword}\\s*:\\s*)(\\d+(?:\\.\\d+)?)`, "i"),
+    ];
+    for (const pattern of genericPatterns) {
+      if (pattern.test(params.content)) {
+        return params.content.replace(pattern, `$1${params.nextValue}$3`);
+      }
+    }
+  }
+
+  return null;
+}
+
+function parseSpacingInstructionValue(intent: EditIntent): {
+  value: string | null;
+  axis: "all" | "x" | "y";
+} | null {
+  if (intent.kind !== "set-spacing") {
+    return null;
+  }
+
+  if (!intent.requestedValue) {
+    return {
+      value: null,
+      axis: "all",
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(intent.requestedValue) as {
+      value?: string | null;
+      axis?: "all" | "x" | "y" | null;
+    };
+    return {
+      value: parsed.value || null,
+      axis: parsed.axis || "all",
+    };
+  } catch {
+    return {
+      value: intent.requestedValue,
+      axis: "all",
+    };
+  }
+}
+
+function parseTypographyInstructionValue(intent: EditIntent): {
+  property: "font-size" | "font-weight";
+  value: string | null;
+} | null {
+  if (intent.kind !== "set-size" || !intent.requestedValue) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(intent.requestedValue) as {
+      property?: "font-size" | "font-weight";
+      value?: string | null;
+    };
+    return {
+      property: parsed.property || "font-size",
+      value: parsed.value || null,
+    };
+  } catch {
+    return {
+      property: "font-size",
+      value: intent.requestedValue,
+    };
+  }
+}
+
 async function tryApplyDeterministicStyleReplacement(params: {
   projectDir: string;
   selectionTarget: SelectionTarget | null;
@@ -2809,6 +2905,169 @@ async function tryApplyDeterministicStyleReplacement(params: {
           path: filePath,
           content: nextContent,
           reason: params.intent.summary,
+        },
+      ],
+      rawResponse: null,
+    };
+  }
+
+  return null;
+}
+
+async function tryApplyNumericPropertyEdit(params: {
+  projectDir: string;
+  selectionTarget: SelectionTarget | null;
+  intent: EditIntent;
+  allowedFiles: string[];
+}): Promise<
+  | {
+      summary: string;
+      warnings: string[];
+      changedFiles: Array<{ path: string; content: string; reason?: string }>;
+      rawResponse: string | null;
+    }
+  | null
+> {
+  if (!params.selectionTarget) {
+    return null;
+  }
+
+  const spacingInstruction = parseSpacingInstructionValue(params.intent);
+  const typographyInstruction = parseTypographyInstructionValue(params.intent);
+  const radiusValue =
+    params.intent.kind === "set-radius" ? params.intent.requestedValue || null : null;
+  const requestedValue =
+    spacingInstruction?.value || typographyInstruction?.value || radiusValue || null;
+
+  if (!requestedValue) {
+    return null;
+  }
+
+  const currentValue =
+    params.intent.kind === "set-spacing"
+      ? spacingInstruction?.axis === "x"
+        ? params.selectionTarget.styleSnapshot?.columnGap ||
+          params.selectionTarget.styleSnapshot?.gap ||
+          null
+        : spacingInstruction?.axis === "y"
+          ? params.selectionTarget.styleSnapshot?.rowGap ||
+            params.selectionTarget.styleSnapshot?.gap ||
+            null
+          : params.selectionTarget.styleSnapshot?.gap ||
+            params.selectionTarget.styleSnapshot?.padding ||
+            params.selectionTarget.styleSnapshot?.margin ||
+            null
+      : params.intent.kind === "set-radius"
+        ? params.selectionTarget.styleSnapshot?.borderRadius || null
+        : typographyInstruction?.property === "font-weight"
+          ? params.selectionTarget.styleSnapshot?.fontWeight || null
+          : params.selectionTarget.styleSnapshot?.fontSize || null;
+
+  const keywords =
+    params.intent.kind === "set-spacing"
+      ? spacingInstruction?.axis === "x"
+        ? ["columnGap", "gap", "paddingInline", "paddingLeft", "paddingRight", "marginLeft", "marginRight"]
+        : spacingInstruction?.axis === "y"
+          ? ["rowGap", "gap", "paddingBlock", "paddingTop", "paddingBottom", "marginTop", "marginBottom"]
+          : ["gap", "padding", "margin", "itemSpacing"]
+      : params.intent.kind === "set-radius"
+        ? ["borderRadius", "radius", "rounded"]
+        : typographyInstruction?.property === "font-weight"
+          ? ["fontWeight"]
+          : ["fontSize"];
+
+  for (const filePath of params.allowedFiles) {
+    const absolutePath = resolveInsideRoot(params.projectDir, filePath);
+    if (!isTextLikeFile(absolutePath)) {
+      continue;
+    }
+
+    const currentContent = await fs.readFile(absolutePath, "utf8");
+    const nextContent = replaceNumericValueWithKeywords({
+      content: currentContent,
+      keywords,
+      currentValue,
+      nextValue: requestedValue,
+    });
+
+    if (!nextContent || nextContent === currentContent) {
+      continue;
+    }
+
+    return {
+      summary: `${params.intent.summary} Updated ${keywords[0]} in ${filePath}.`,
+      warnings: [],
+      changedFiles: [
+        {
+          path: filePath,
+          content: nextContent,
+          reason: params.intent.summary,
+        },
+      ],
+      rawResponse: null,
+    };
+  }
+
+  return null;
+}
+
+async function tryApplyImageSourceReplacement(params: {
+  projectDir: string;
+  selectionTarget: SelectionTarget | null;
+  requestedSource: string | null;
+  attachments: AnthropicAttachment[];
+  allowedFiles: string[];
+}): Promise<
+  | {
+      summary: string;
+      warnings: string[];
+      changedFiles: Array<{ path: string; content: string; reason?: string }>;
+      rawResponse: string | null;
+    }
+  | null
+> {
+  if (!params.selectionTarget) {
+    return null;
+  }
+
+  const currentSource =
+    params.selectionTarget.styleSnapshot?.imageSrc ||
+    params.selectionTarget.payload.src ||
+    params.selectionTarget.resolvedHandles.find((handle) => handle.key === "image")?.currentValue ||
+    null;
+  const nextSource =
+    params.attachments.find((attachment) => attachment.mimeType.startsWith("image/"))?.filename ||
+    params.requestedSource ||
+    null;
+
+  if (!currentSource || !nextSource) {
+    return null;
+  }
+
+  for (const filePath of params.allowedFiles) {
+    const absolutePath = resolveInsideRoot(params.projectDir, filePath);
+    if (!isTextLikeFile(absolutePath)) {
+      continue;
+    }
+
+    const currentContent = await fs.readFile(absolutePath, "utf8");
+    if (!currentContent.includes(currentSource)) {
+      continue;
+    }
+
+    const nextContent = currentContent.replace(currentSource, nextSource);
+    if (nextContent === currentContent) {
+      continue;
+    }
+
+    return {
+      summary: `Updated the selected image source in ${filePath}.`,
+      warnings: [],
+      changedFiles: [
+        {
+          path: filePath,
+          content: nextContent,
+          reason: "Swap the selected image source.",
         },
       ],
       rawResponse: null,
@@ -3103,6 +3362,8 @@ async function tryApplyDeterministicEdit(params: {
   selectionTarget: SelectionTarget | null;
   candidateFiles: string[];
   intent: EditIntent;
+  attachments: AnthropicAttachment[];
+  uiOperations: UiOperation[];
 }): Promise<
   | {
       summary: string;
@@ -3151,6 +3412,32 @@ async function tryApplyDeterministicEdit(params: {
       projectDir: params.projectDir,
       selectionTarget: params.selectionTarget,
       intent: params.intent,
+      allowedFiles: params.candidateFiles,
+    });
+  }
+
+  if (
+    params.intent.kind === "set-spacing" ||
+    params.intent.kind === "set-radius" ||
+    params.intent.kind === "set-size"
+  ) {
+    return tryApplyNumericPropertyEdit({
+      projectDir: params.projectDir,
+      selectionTarget: params.selectionTarget,
+      intent: params.intent,
+      allowedFiles: params.candidateFiles,
+    });
+  }
+
+  if (params.intent.kind === "swap-image") {
+    return tryApplyImageSourceReplacement({
+      projectDir: params.projectDir,
+      selectionTarget: params.selectionTarget,
+      requestedSource:
+        (params.uiOperations.find((operation) => operation.kind === "swapImage")?.value as string | null) ||
+        params.intent.requestedValue ||
+        null,
+      attachments: params.attachments,
       allowedFiles: params.candidateFiles,
     });
   }
@@ -3248,11 +3535,169 @@ function didChartBarNormalizationTargetSelection(params: {
   });
 }
 
-function validateTargetPersistence(params: {
+function normalizeProofValue(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  return String(value).replace(/\s+/g, " ").trim().toLowerCase() || null;
+}
+
+function buildExpectedProofValues(params: {
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
+}): Array<{ key: string; value: string | null }> {
+  const expectations: Array<{ key: string; value: string | null }> = [];
+
+  for (const operation of params.editPlan.uiOperations) {
+    const normalizedValue = normalizeProofValue(operation.value);
+    if (operation.kind === "setText") {
+      expectations.push({ key: "text", value: normalizedValue });
+    }
+    if (operation.kind === "setColor") {
+      expectations.push({ key: operation.property || "fill-color", value: normalizedValue });
+    }
+    if (operation.kind === "setSpacing") {
+      expectations.push({
+        key:
+          operation.axis === "x"
+            ? "spacing-x"
+            : operation.axis === "y"
+              ? "spacing-y"
+              : "spacing",
+        value: normalizedValue,
+      });
+    }
+    if (operation.kind === "setRadius") {
+      expectations.push({ key: "radius", value: normalizedValue });
+    }
+    if (operation.kind === "setVisibility") {
+      expectations.push({ key: "visibility", value: normalizedValue });
+    }
+    if (operation.kind === "swapImage") {
+      expectations.push({ key: "image-src", value: normalizedValue });
+    }
+    if (operation.kind === "setTypography") {
+      expectations.push({ key: operation.property || "font-size", value: normalizedValue });
+    }
+  }
+
+  if (!expectations.length && params.editPlan.intent.kind === "replace-text") {
+    expectations.push({
+      key: "text",
+      value:
+        normalizeProofValue(params.selectionTarget?.proofHandles.find((handle) => handle.key === "text")?.value) ||
+        null,
+    });
+  }
+
+  return expectations.filter((item) => item.value);
+}
+
+function didProofHandlesChangeInFiles(params: {
   changedFiles: Array<{ path: string; content: string; reason?: string }>;
   selectionTarget: SelectionTarget | null;
   editPlan: EditPlan;
-}): TargetValidationResult {
+}): boolean {
+  const expectations = buildExpectedProofValues(params);
+  if (!expectations.length) {
+    return params.changedFiles.length > 0;
+  }
+
+  return expectations.every((expectation) => {
+    const beforeValue =
+      params.selectionTarget?.proofHandles.find((handle) => handle.key === expectation.key)?.value || null;
+    return params.changedFiles.some((file) => {
+      const normalizedContent = normalizeProofValue(file.content) || "";
+      if (!normalizedContent.includes(expectation.value || "")) {
+        return false;
+      }
+      if (beforeValue && normalizeProofValue(beforeValue) === expectation.value) {
+        return false;
+      }
+      if (expectation.key === "visibility") {
+        return /hidden|display|visibility/.test(normalizedContent);
+      }
+      if (expectation.key === "line-color") {
+        return /stroke/.test(normalizedContent);
+      }
+      if (expectation.key === "fill-color" || expectation.key === "background-color") {
+        return /fill|background/.test(normalizedContent);
+      }
+      if (expectation.key === "radius") {
+        return /radius|rounded/.test(normalizedContent);
+      }
+      if (expectation.key === "spacing" || expectation.key === "spacing-x" || expectation.key === "spacing-y") {
+        return /gap|padding|margin|spacing/.test(normalizedContent);
+      }
+      if (expectation.key === "image-src") {
+        return /src/.test(normalizedContent);
+      }
+      if (expectation.key === "font-size" || expectation.key === "font-weight") {
+        return /font/.test(normalizedContent);
+      }
+      return true;
+    });
+  });
+}
+
+async function runPreviewProof(params: {
+  projectId: string;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
+}): Promise<{
+  livePreviewReachable: boolean;
+  previewProofMatched: boolean;
+  details: string[];
+}> {
+  try {
+    const targetUrl = await getPreviewTargetUrl(params.projectId);
+    const routeUrl = new URL(params.selectionTarget?.route || "/", targetUrl);
+    const response = await fetch(routeUrl.toString(), { redirect: "follow" });
+    if (!response.ok) {
+      return {
+        livePreviewReachable: false,
+        previewProofMatched: false,
+        details: [`Preview proof failed because ${routeUrl} returned ${response.status}.`],
+      };
+    }
+
+    const html = await response.text();
+    const expectations = buildExpectedProofValues(params).filter((item) => item.key === "text" || item.key === "image-src");
+    const previewProofMatched = expectations.length
+      ? expectations.every((expectation) => (normalizeProofValue(html) || "").includes(expectation.value || ""))
+      : collectStableTargetAnchors(params.selectionTarget).some((anchor) =>
+          (normalizeProofValue(html) || "").includes(anchor.toLowerCase()),
+        );
+
+    return {
+      livePreviewReachable: true,
+      previewProofMatched,
+      details: [
+        previewProofMatched
+          ? "Preview HTML still contains the expected target proof values."
+          : "Preview HTML did not expose enough exact target proof values to fully verify the render.",
+      ],
+    };
+  } catch (error) {
+    return {
+      livePreviewReachable: false,
+      previewProofMatched: false,
+      details: [
+        error instanceof Error
+          ? `Preview proof failed: ${error.message}`
+          : "Preview proof failed.",
+      ],
+    };
+  }
+}
+
+async function validateTargetPersistence(params: {
+  projectId: string;
+  changedFiles: Array<{ path: string; content: string; reason?: string }>;
+  selectionTarget: SelectionTarget | null;
+  editPlan: EditPlan;
+}): Promise<TargetValidationResult> {
   const changedPaths = params.changedFiles.map((file) => toPosixPath(file.path));
   const targetAnchors = collectStableTargetAnchors(params.selectionTarget);
   const anchorMatched = !targetAnchors.length
@@ -3271,11 +3716,7 @@ function validateTargetPersistence(params: {
 
   if (params.selectionTarget) {
     if (params.editPlan.intent.kind === "replace-text") {
-      changedIntendedTarget = changedPaths.some(
-        (filePath) =>
-          filePath === params.selectionTarget?.sourceFilePath ||
-          params.selectionTarget?.sourceCandidates.some((candidate) => candidate.path === filePath),
-      );
+      changedIntendedTarget = didProofHandlesChangeInFiles(params);
     } else if (params.editPlan.intent.kind === "normalize-chart-bars") {
       const normalizationInstruction = parseChartBarNormalizationIntentValue(params.editPlan.intent);
       changedIntendedTarget = Boolean(
@@ -3302,19 +3743,19 @@ function validateTargetPersistence(params: {
             }),
         );
       } else {
-        const nextValue = params.editPlan.intent.requestedValue || "";
-        const relevantKeyword =
-          params.editPlan.intent.kind === "set-line-color"
-            ? /stroke/i
-            : params.editPlan.intent.kind === "set-fill-color"
-              ? /fill/i
-              : /background|fill/i;
-        changedIntendedTarget = params.changedFiles.some(
-          (file) => file.content.includes(nextValue) && relevantKeyword.test(file.content),
-        );
+        changedIntendedTarget = didProofHandlesChangeInFiles(params);
       }
+    } else if (
+      params.editPlan.intent.kind === "set-spacing" ||
+      params.editPlan.intent.kind === "set-radius" ||
+      params.editPlan.intent.kind === "set-size" ||
+      params.editPlan.intent.kind === "swap-image"
+    ) {
+      changedIntendedTarget = didProofHandlesChangeInFiles(params);
     } else if (params.editPlan.intent.kind === "set-visibility") {
-      changedIntendedTarget = changedPaths.some((filePath) => filePath === OVERRIDES_CONFIG_PATH);
+      changedIntendedTarget =
+        changedPaths.some((filePath) => filePath === OVERRIDES_CONFIG_PATH) ||
+        didProofHandlesChangeInFiles(params);
     } else {
       changedIntendedTarget = changedPaths.length > 0;
     }
@@ -3323,11 +3764,20 @@ function validateTargetPersistence(params: {
     changedIntendedTarget &&
     (params.selectionTarget?.scopeMode === "all-matching" ? sourceMappingValid : anchorMatched);
 
+  const previewProof = await runPreviewProof({
+    projectId: params.projectId,
+    selectionTarget: params.selectionTarget,
+    editPlan: params.editPlan,
+  });
+
   return {
     changedIntendedTarget,
     preservedNearbyElements,
     sourceMappingValid,
-    runtimeHealthy: true,
+    runtimeHealthy: previewProof.livePreviewReachable,
+    livePreviewReachable: previewProof.livePreviewReachable,
+    previewProofMatched: previewProof.previewProofMatched,
+    proofMethod: previewProof.livePreviewReachable ? "html-preview" : "changed-file",
     details: [
       changedIntendedTarget
         ? "The requested target change was persisted in the planned file scope."
@@ -3345,6 +3795,7 @@ function validateTargetPersistence(params: {
       preservedNearbyElements
         ? "Nearby scope remained constrained."
         : "The edit widened beyond the expected nearby scope.",
+      ...previewProof.details,
     ],
   };
 }
@@ -3385,12 +3836,17 @@ async function runEditValidation(params: {
     brandKit: knowledge.brandKit,
   });
 
-  const targetValidation = validateTargetPersistence({
+  const targetValidation = await validateTargetPersistence({
+    projectId: params.projectId,
     changedFiles: params.changedFiles,
     selectionTarget: params.selectionTarget,
     editPlan: params.editPlan,
   });
-  if (!targetValidation.changedIntendedTarget || !targetValidation.sourceMappingValid) {
+  if (
+    !targetValidation.changedIntendedTarget ||
+    !targetValidation.sourceMappingValid ||
+    !targetValidation.runtimeHealthy
+  ) {
     throw new Error(targetValidation.details.join(" "));
   }
 
@@ -3661,6 +4117,8 @@ Fix the root cause before applying the edit. You may update related files, style
             selectionTarget,
             candidateFiles: editPlan.allowedFiles,
             intent: editPlan.intent,
+            attachments,
+            uiOperations: editPlan.uiOperations,
           });
           if (!directResult) {
             throw new Error("Direct property mode could not safely resolve this change.");

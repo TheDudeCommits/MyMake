@@ -71,6 +71,34 @@ function createContextGraph(candidateFiles: string[], selectionTarget: Selection
   };
 }
 
+function createSelectionTarget(overrides: Partial<SelectionTarget>): SelectionTarget {
+  return {
+    targetId: "target",
+    fingerprint: "selection-fingerprint",
+    route: "/",
+    label: "Selection",
+    summary: "Selection summary",
+    sourceFilePath: null,
+    sourceCandidates: [],
+    confidence: 0.5,
+    componentName: null,
+    sectionName: null,
+    repeatGroup: null,
+    instanceScope: null,
+    instanceIndex: null,
+    scopeMode: "instance",
+    visualType: null,
+    sourceAnchor: null,
+    resolutionMethod: "heuristic-file-score",
+    styleSnapshot: null,
+    proofHandles: [],
+    resolvedHandles: [],
+    editableCapabilities: [],
+    payload: createSelection(),
+    ...overrides,
+  };
+}
+
 test("buildSelectionTarget prefers the repeated card component over the page-level chart", async () => {
   const projectDir = await createTempProject({
     "src/app/components/TrendChart.tsx": `
@@ -229,7 +257,7 @@ test("buildSelectionTarget trusts React source hints over route-level chart gues
 });
 
 test("buildEditPlan routes simple chart-line changes through the deterministic lane", async () => {
-  const selectionTarget = {
+  const selectionTarget = createSelectionTarget({
     targetId: "target-1",
     fingerprint: "path::offshore-card::stroke",
     route: "/",
@@ -263,7 +291,7 @@ test("buildEditPlan routes simple chart-line changes through the deterministic l
       { key: "visibility", label: "Visibility", confidence: 0.9 },
     ],
     payload: createSelection(),
-  } satisfies SelectionTarget;
+  });
 
   const plan = buildEditPlan({
     currentFilePath: "src/app/components/StatCard.tsx",
@@ -284,7 +312,7 @@ test("buildEditPlan routes simple chart-line changes through the deterministic l
 });
 
 test("buildEditPlan routes directional chart-line prompts through the deterministic lane", async () => {
-  const selectionTarget = {
+  const selectionTarget = createSelectionTarget({
     targetId: "target-3",
     fingerprint: "path::virtual-card::stroke",
     route: "/",
@@ -323,7 +351,7 @@ test("buildEditPlan routes directional chart-line prompts through the determinis
       reactComponentStack: ["DepositCard", "DepositsBreakdown", "App"],
       reactSourceHints: ["DepositsBreakdown.tsx", "DepositCard", "Virtual"],
     }),
-  } satisfies SelectionTarget;
+  });
 
   const plan = buildEditPlan({
     currentFilePath: "src/app/components/DepositsBreakdown.tsx",
@@ -342,7 +370,7 @@ test("buildEditPlan routes directional chart-line prompts through the determinis
 });
 
 test("buildEditPlan routes bar-chart normalization prompts through the deterministic lane", async () => {
-  const selectionTarget = {
+  const selectionTarget = createSelectionTarget({
     targetId: "target-bar-1",
     fingerprint: "rect::revenue-chart::bar",
     route: "/",
@@ -387,7 +415,7 @@ test("buildEditPlan routes bar-chart normalization prompts through the determini
       reactComponentStack: ["RevenueChart", "App"],
       reactSourceHints: ["RevenueChart.tsx", "RevenueChart"],
     }),
-  } satisfies SelectionTarget;
+  });
 
   const plan = buildEditPlan({
     currentFilePath: "src/app/components/RevenueChart.tsx",
@@ -405,7 +433,7 @@ test("buildEditPlan routes bar-chart normalization prompts through the determini
 });
 
 test("buildEditPlan still routes directional chart prompts deterministically when the selected region is a chart container", async () => {
-  const selectionTarget = {
+  const selectionTarget = createSelectionTarget({
     targetId: "target-4",
     fingerprint: "div::virtual-card::sparkline-container",
     route: "/",
@@ -452,7 +480,7 @@ test("buildEditPlan still routes directional chart prompts deterministically whe
       reactComponentStack: [],
       reactSourceHints: [],
     }),
-  } satisfies SelectionTarget;
+  });
 
   const plan = buildEditPlan({
     currentFilePath: "src/app/components/DepositsBreakdown.tsx",
@@ -469,7 +497,7 @@ test("buildEditPlan still routes directional chart prompts deterministically whe
 });
 
 test("buildEditPlan requires confirmation when target confidence is low", async () => {
-  const selectionTarget = {
+  const selectionTarget = createSelectionTarget({
     targetId: "target-2",
     fingerprint: "low-confidence",
     route: "/",
@@ -497,7 +525,7 @@ test("buildEditPlan requires confirmation when target confidence is low", async 
       visualType: "container",
       editableProperties: ["visibility"],
     }),
-  } satisfies SelectionTarget;
+  });
 
   const plan = buildEditPlan({
     currentFilePath: "src/app/App.tsx",
@@ -579,6 +607,7 @@ test("directional trend deterministic edits can target a repeated instance by in
     allowedFiles: ["src/app/components/DepositsBreakdown.tsx"],
     intent: {
       kind: "set-directional-trend-colors",
+      confidence: 0.95,
       summary: "Color only this selected sparkline by direction.",
       target: "Virtual sparkline",
       requestedValue: JSON.stringify({
@@ -592,7 +621,7 @@ test("directional trend deterministic edits can target a repeated instance by in
         lineOnly: true,
       },
     },
-    selectionTarget: {
+    selectionTarget: createSelectionTarget({
       targetId: "target-5",
       fingerprint: "path::virtual-card::stroke",
       route: "/",
@@ -630,7 +659,7 @@ test("directional trend deterministic edits can target a repeated instance by in
         instanceIndex: 1,
         repeatKey: "deposit-card",
       }),
-    },
+    }),
   });
 
   assert.ok(result);
@@ -705,6 +734,7 @@ test("directional trend deterministic edits support inline DepositCard trendColo
     allowedFiles: ["src/app/components/DepositsBreakdown.tsx"],
     intent: {
       kind: "set-directional-trend-colors",
+      confidence: 0.95,
       summary: "Color only this selected sparkline by direction.",
       target: "Virtual sparkline",
       requestedValue: JSON.stringify({
@@ -718,7 +748,7 @@ test("directional trend deterministic edits support inline DepositCard trendColo
         lineOnly: true,
       },
     },
-    selectionTarget: {
+    selectionTarget: createSelectionTarget({
       targetId: "target-6",
       fingerprint: "path::virtual-card::stroke",
       route: "/",
@@ -756,7 +786,7 @@ test("directional trend deterministic edits support inline DepositCard trendColo
         instanceIndex: 1,
         repeatKey: "deposit-card",
       }),
-    },
+    }),
   });
 
   assert.ok(result);
@@ -802,7 +832,7 @@ test("chart bar normalization removes a one-off highlighted last bar while keepi
       }),
       summary: "Normalize the selected revenue bars and remove the highlighted accent bar.",
     },
-    selectionTarget: {
+    selectionTarget: createSelectionTarget({
       targetId: "target-bar-2",
       fingerprint: "rect::revenue-chart::bar",
       route: "/",
@@ -845,7 +875,7 @@ test("chart bar normalization removes a one-off highlighted last bar while keepi
         visualType: "chart-bar",
         contextTexts: ["Revenue Overview", "Monthly revenue breakdown", "Dec"],
       }),
-    },
+    }),
   });
 
   assert.ok(result);

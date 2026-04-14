@@ -34,6 +34,49 @@ const selectionSchema = z
     visualType: z.string().nullable().optional(),
     reactComponentStack: z.array(z.string()).optional(),
     reactSourceHints: z.array(z.string()).optional(),
+    sourceAnchor: z
+      .object({
+        filePath: z.string().nullable(),
+        line: z.number().nullable(),
+        column: z.number().nullable(),
+        componentName: z.string().nullable(),
+        ownerStack: z.array(z.string()).default([]),
+      })
+      .nullable()
+      .optional(),
+    styleSnapshot: z
+      .object({
+        textColor: z.string().nullable(),
+        lineColor: z.string().nullable(),
+        fillColor: z.string().nullable(),
+        backgroundColor: z.string().nullable(),
+        borderRadius: z.string().nullable(),
+        opacity: z.string().nullable(),
+        fontSize: z.string().nullable(),
+        fontWeight: z.string().nullable(),
+        display: z.string().nullable(),
+        visibility: z.string().nullable(),
+        width: z.number().nullable(),
+        height: z.number().nullable(),
+        gap: z.string().nullable(),
+        rowGap: z.string().nullable(),
+        columnGap: z.string().nullable(),
+        padding: z.string().nullable(),
+        margin: z.string().nullable(),
+        imageSrc: z.string().nullable(),
+      })
+      .nullable()
+      .optional(),
+    proofHandles: z
+      .array(
+        z.object({
+          key: z.string(),
+          label: z.string(),
+          value: z.string().nullable(),
+          confidence: z.number(),
+        }),
+      )
+      .optional(),
     boundingBox: z.object({
       x: z.number(),
       y: z.number(),

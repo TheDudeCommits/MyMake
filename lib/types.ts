@@ -31,6 +31,13 @@ export type EditStrategy = "direct-property" | "static-override" | "patch" | "re
 export type EditRisk = "low" | "medium" | "high";
 export type ExecutionLane = "deterministic" | "scoped-ai" | "deep-fix";
 export type SelectionScopeMode = "instance" | "all-matching";
+export type SourceResolutionMethod =
+  | "react-source-anchor"
+  | "react-source-hints"
+  | "heuristic-file-score"
+  | "active-file-fallback"
+  | "route-fallback"
+  | "unknown";
 export type EditIntentKind =
   | "replace-text"
   | "set-line-color"
@@ -44,6 +51,15 @@ export type EditIntentKind =
   | "set-visibility"
   | "swap-image"
   | "unknown";
+export type UiOperationKind =
+  | "setText"
+  | "setColor"
+  | "setSpacing"
+  | "setRadius"
+  | "setVisibility"
+  | "swapImage"
+  | "setTypography"
+  | "updateRepeatedItem";
 
 export interface ProjectRecord {
   id: string;
@@ -88,6 +104,42 @@ export interface BoundingBox {
   height: number;
 }
 
+export interface ReactSourceAnchor {
+  filePath: string | null;
+  line: number | null;
+  column: number | null;
+  componentName: string | null;
+  ownerStack: string[];
+}
+
+export interface SelectionStyleSnapshot {
+  textColor: string | null;
+  lineColor: string | null;
+  fillColor: string | null;
+  backgroundColor: string | null;
+  borderRadius: string | null;
+  opacity: string | null;
+  fontSize: string | null;
+  fontWeight: string | null;
+  display: string | null;
+  visibility: string | null;
+  width: number | null;
+  height: number | null;
+  gap: string | null;
+  rowGap: string | null;
+  columnGap: string | null;
+  padding: string | null;
+  margin: string | null;
+  imageSrc: string | null;
+}
+
+export interface SelectionProofHandle {
+  key: string;
+  label: string;
+  value: string | null;
+  confidence: number;
+}
+
 export interface SelectionPayload {
   route: string;
   url: string;
@@ -117,6 +169,9 @@ export interface SelectionPayload {
   visualType?: string | null;
   reactComponentStack?: string[];
   reactSourceHints?: string[];
+  sourceAnchor?: ReactSourceAnchor | null;
+  styleSnapshot?: SelectionStyleSnapshot | null;
+  proofHandles?: SelectionProofHandle[];
 }
 
 export interface FileNode {
@@ -219,9 +274,25 @@ export interface SelectionTarget {
   instanceIndex: number | null;
   scopeMode: SelectionScopeMode;
   visualType: string | null;
+  sourceAnchor: ReactSourceAnchor | null;
+  resolutionMethod: SourceResolutionMethod;
+  styleSnapshot: SelectionStyleSnapshot | null;
+  proofHandles: SelectionProofHandle[];
   resolvedHandles: ResolvedHandle[];
   editableCapabilities: EditableCapability[];
   payload: SelectionPayload;
+}
+
+export interface UiOperation {
+  id: string;
+  kind: UiOperationKind;
+  scope: SelectionScopeMode;
+  targetFingerprint: string | null;
+  sourceFileHint: string | null;
+  property: string | null;
+  value: string | number | boolean | Record<string, unknown> | null;
+  axis: "all" | "x" | "y" | null;
+  summary: string;
 }
 
 export interface ContextSourceRecord {
@@ -311,6 +382,7 @@ export interface EditPlan {
   strategy: EditStrategy;
   lane: ExecutionLane;
   intent: EditIntent;
+  uiOperations: UiOperation[];
   risk: EditRisk;
   candidateFiles: string[];
   allowedFiles: string[];
@@ -385,6 +457,8 @@ export interface EditIntent {
   confidence: number;
   requestedValue?: string | null;
   currentValue?: string | null;
+  target?: string | null;
+  parameters?: Record<string, unknown> | null;
   summary: string;
 }
 
@@ -404,6 +478,9 @@ export interface TargetValidationResult {
   preservedNearbyElements: boolean;
   sourceMappingValid: boolean;
   runtimeHealthy: boolean;
+  livePreviewReachable?: boolean;
+  previewProofMatched?: boolean;
+  proofMethod?: "live-preview" | "html-preview" | "changed-file" | "file-scope-only";
   details: string[];
 }
 

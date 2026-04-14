@@ -44,6 +44,8 @@ interface BuildManagedAiContextParams {
       palette: string[];
       fonts: string[];
       primitives: string[];
+      tokens: string[];
+      typographyScale: string[];
     };
     componentIndex: {
       components: Array<{
@@ -197,6 +199,8 @@ async function syncGuidelineFiles(params: {
       `Palette: ${params.knowledge.brandKit.palette.join(", ") || "Not detected"}`,
       `Fonts: ${params.knowledge.brandKit.fonts.join(", ") || "Not detected"}`,
       `Primitives: ${params.knowledge.brandKit.primitives.join(", ") || "Not detected"}`,
+      `CSS variables: ${params.knowledge.brandKit.tokens.join(", ") || "Not detected"}`,
+      `Typography scale: ${params.knowledge.brandKit.typographyScale.join(", ") || "Not detected"}`,
     ].join("\n"),
   );
 
@@ -208,6 +212,7 @@ async function syncGuidelineFiles(params: {
       "Prefer these existing palette values and only add new colors when the prompt explicitly asks for a broader redesign.",
       "",
       ...params.knowledge.brandKit.palette.map((color) => `- ${color}`),
+      ...params.knowledge.brandKit.tokens.map((token) => `- ${token}`),
       ...(params.knowledge.brandKit.palette.length ? [] : ["- No palette extracted yet"]),
     ].join("\n"),
   );
@@ -220,6 +225,7 @@ async function syncGuidelineFiles(params: {
       "Reuse the existing typography feel before introducing new font stacks or scales.",
       "",
       ...params.knowledge.brandKit.fonts.map((font) => `- ${font}`),
+      ...params.knowledge.brandKit.typographyScale.map((value) => `- ${value}`),
       ...(params.knowledge.brandKit.fonts.length ? [] : ["- No project fonts extracted yet"]),
     ].join("\n"),
   );

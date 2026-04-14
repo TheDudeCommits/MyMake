@@ -319,6 +319,9 @@ function buildCommonContentBlocks(params: {
           : []),
         `Edit mode: ${params.editMode}`,
         `Edit plan: ${JSON.stringify(params.editPlan, null, 2)}`,
+        ...(params.editPlan.uiOperations.length
+          ? [`Planned UI operations: ${JSON.stringify(params.editPlan.uiOperations, null, 2)}`]
+          : []),
         `Selected element: ${
           params.selection
             ? JSON.stringify(params.selection, null, 2)
@@ -409,6 +412,7 @@ export async function requestAiEdit(params: {
     "Preserve existing file paths and module wiring by default.",
     "Keep Tailwind and existing styling conventions intact unless the prompt explicitly asks for a larger redesign.",
     "Treat the provided edit plan and semantic target as hard constraints unless the prompt explicitly broadens the scope.",
+    "Treat any planned UI operations in the edit plan as a structured contract for the intended change.",
     "Read the provided design system guidelines, project memory, managed conversation history, and current state summary before making changes.",
     ...(isStaticOverrideContext(params) ? staticOverrideInstructions() : []),
   ].join("\n");
@@ -478,6 +482,7 @@ export async function requestAnthropicPatchEdit(params: {
     "Use an empty string in replace to remove content.",
     "Prefer 1-3 targeted operations.",
     "Honor the provided edit plan and semantic target when choosing search/replace operations.",
+    "Honor any planned UI operations in the edit plan and preserve their scope.",
     "Read the provided design system guidelines, project memory, managed conversation history, and current state summary before deciding the patch.",
   ].join("\n");
 

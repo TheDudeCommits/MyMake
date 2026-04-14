@@ -10,6 +10,9 @@
     "build": "next build",
     "start": "NODE_ENV=production tsx server.ts",
     "lint": "next lint",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:benchmarks": "tsx scripts/run-reliability-benchmarks.ts",
+    "typecheck": "tsc -p tsconfig.typecheck.json --noEmit --incremental false",
     "codex-bridge": "tsx scripts/codex-bridge.ts"
   },
   "dependencies": {
