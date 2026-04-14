@@ -2816,44 +2816,63 @@ async function tryApplyDirectionalTrendEdit(params: {
     const selectedLabel = inferSelectedInstanceLabel(params.selectionTarget, currentContent);
     const selectedInstanceIndex = inferSelectedInstanceIndex(params.selectionTarget);
     let appliedScopedPatch = false;
-
-    if (
+    const matchesSegmentBuilderPattern =
       /function buildDirectionalSegments\s*\(/.test(nextContent) &&
+      /function DepositCard\s*\(/.test(nextContent);
+    const matchesInlineDepositCardPattern =
       /function DepositCard\s*\(/.test(nextContent) &&
-      (selectedLabel || selectedInstanceIndex || applyToAllMatching)
-    ) {
+      /const trendColor = isUpward \?/.test(nextContent) &&
+      /lineColor,/.test(nextContent) &&
+      /gradientId,/.test(nextContent);
+
+    if ((matchesSegmentBuilderPattern || matchesInlineDepositCardPattern) && (selectedLabel || selectedInstanceIndex || applyToAllMatching)) {
       if (!/upTrendColor\?: string;/.test(nextContent)) {
         nextContent = nextContent.replace(
-          /(\s*accent\?: boolean;\s*\n\s*delay\?: number;\s*\n)/,
-          `$1  upTrendColor?: string;\n  downTrendColor?: string;\n  areaOpacity?: number;\n`,
+          matchesSegmentBuilderPattern
+            ? /(\s*accent\?: boolean;\s*\n\s*delay\?: number;\s*\n)/
+            : /(\s*accent\?: boolean;\s*\n\s*delay\?: number;\s*\n)/,
+          matchesSegmentBuilderPattern
+            ? `$1  upTrendColor?: string;\n  downTrendColor?: string;\n  areaOpacity?: number;\n`
+            : `$1  upTrendColor?: string;\n  downTrendColor?: string;\n`,
         );
       }
 
-      nextContent = nextContent.replace(
-        /function buildDirectionalSegments\(\s*([\s\S]*?)gradientPrefix: string,\s*\n\): TrendSegment\[] \{/,
-        `function buildDirectionalSegments(\n  $1gradientPrefix: string,\n  upTrendColor: string,\n  downTrendColor: string,\n): TrendSegment[] {`,
-      );
-      nextContent = nextContent.replace(
-        /const color = isUpTrend \? UP_TREND_COLOR : DOWN_TREND_COLOR;/,
-        "const color = isUpTrend ? upTrendColor : downTrendColor;",
-      );
+      if (matchesSegmentBuilderPattern) {
+        nextContent = nextContent.replace(
+          /function buildDirectionalSegments\(\s*([\s\S]*?)gradientPrefix: string,\s*\n\): TrendSegment\[] \{/,
+          `function buildDirectionalSegments(\n  $1gradientPrefix: string,\n  upTrendColor: string,\n  downTrendColor: string,\n): TrendSegment[] {`,
+        );
+        nextContent = nextContent.replace(
+          /const color = isUpTrend \? UP_TREND_COLOR : DOWN_TREND_COLOR;/,
+          "const color = isUpTrend ? upTrendColor : downTrendColor;",
+        );
 
-      nextContent = nextContent.replace(
-        /(\s*accent = false,\s*\n\s*delay = 0,\s*\n)/,
-        `$1  upTrendColor = UP_TREND_COLOR,\n  downTrendColor = DOWN_TREND_COLOR,\n  areaOpacity = 0.2,\n`,
-      );
-      nextContent = nextContent.replace(
-        /buildDirectionalSegments\(chartData, gradientId\)/,
-        "buildDirectionalSegments(chartData, gradientId, upTrendColor, downTrendColor)",
-      );
-      nextContent = nextContent.replace(
-        /stopColor=\{segment\.color\} stopOpacity=\{0\.2\}/g,
-        "stopColor={segment.color} stopOpacity={areaOpacity}",
-      );
-      nextContent = nextContent.replace(
-        /stopColor=\{UP_TREND_COLOR\} stopOpacity=\{0\.2\}/g,
-        "stopColor={upTrendColor} stopOpacity={areaOpacity}",
-      );
+        nextContent = nextContent.replace(
+          /(\s*accent = false,\s*\n\s*delay = 0,\s*\n)/,
+          `$1  upTrendColor = UP_TREND_COLOR,\n  downTrendColor = DOWN_TREND_COLOR,\n  areaOpacity = 0.2,\n`,
+        );
+        nextContent = nextContent.replace(
+          /buildDirectionalSegments\(chartData, gradientId\)/,
+          "buildDirectionalSegments(chartData, gradientId, upTrendColor, downTrendColor)",
+        );
+        nextContent = nextContent.replace(
+          /stopColor=\{segment\.color\} stopOpacity=\{0\.2\}/g,
+          "stopColor={segment.color} stopOpacity={areaOpacity}",
+        );
+        nextContent = nextContent.replace(
+          /stopColor=\{UP_TREND_COLOR\} stopOpacity=\{0\.2\}/g,
+          "stopColor={upTrendColor} stopOpacity={areaOpacity}",
+        );
+      } else if (matchesInlineDepositCardPattern) {
+        nextContent = nextContent.replace(
+          /const trendColor = isUpward \? ["'][^"']+["'] : ["'][^"']+["'];/,
+          "const trendColor = isUpward ? upTrendColor : downTrendColor;",
+        );
+        nextContent = nextContent.replace(
+          /(\s*accent = false,\s*\n\s*delay = 0,\s*\n)/,
+          `$1  upTrendColor = "#22c55e",\n  downTrendColor = "#ef4444",\n`,
+        );
+      }
 
       const injectScopedProps = (input: string): string => {
         let scopedInstance = input;
@@ -2863,7 +2882,7 @@ async function tryApplyDirectionalTrendEdit(params: {
         if (!/downTrendColor=/.test(scopedInstance)) {
           scopedInstance += `\n          downTrendColor="${instruction.downColor}"`;
         }
-        if (instruction.lineOnly && !/areaOpacity=/.test(scopedInstance)) {
+        if (matchesSegmentBuilderPattern && instruction.lineOnly && !/areaOpacity=/.test(scopedInstance)) {
           scopedInstance += `\n          areaOpacity={0}`;
         }
         return scopedInstance;
@@ -2896,16 +2915,22 @@ async function tryApplyDirectionalTrendEdit(params: {
       }
 
       if (applyToAllMatching) {
-        nextContent = nextContent.replace(
-          /upTrendColor = [^,\n]+,/,
-          `upTrendColor = "${instruction.upColor}",`,
-        );
-        nextContent = nextContent.replace(
-          /downTrendColor = [^,\n]+,/,
-          `downTrendColor = "${instruction.downColor}",`,
-        );
-        if (instruction.lineOnly) {
-          nextContent = nextContent.replace(/areaOpacity = [^,\n]+,/, "areaOpacity = 0,");
+        if (/upTrendColor = [^,\n]+,/.test(nextContent)) {
+          nextContent = nextContent.replace(
+            /upTrendColor = [^,\n]+,/,
+            `upTrendColor = "${instruction.upColor}",`,
+          );
+        }
+        if (/downTrendColor = [^,\n]+,/.test(nextContent)) {
+          nextContent = nextContent.replace(
+            /downTrendColor = [^,\n]+,/,
+            `downTrendColor = "${instruction.downColor}",`,
+          );
+        }
+        if (matchesSegmentBuilderPattern && instruction.lineOnly) {
+          if (/areaOpacity = [^,\n]+,/.test(nextContent)) {
+            nextContent = nextContent.replace(/areaOpacity = [^,\n]+,/, "areaOpacity = 0,");
+          }
         }
       }
     }

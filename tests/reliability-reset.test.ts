@@ -573,3 +573,128 @@ test("directional trend deterministic edits can target a repeated instance by in
   assert.match(result?.changedFiles[0]?.content || "", /<DepositCard label="Virtual"[\s\S]*upTrendColor="#22c55e"/);
   assert.doesNotMatch(result?.changedFiles[0]?.content || "", /<DepositCard label="Offshore"[\s\S]*upTrendColor="#22c55e"/);
 });
+
+test("directional trend deterministic edits support inline DepositCard trendColor logic from production projects", async () => {
+  const projectDir = await createTempProject({
+    "src/app/components/DepositsBreakdown.tsx": `
+      interface DepositCardProps {
+        label: string;
+        lineColor: string;
+        gradientId: string;
+        accent?: boolean;
+        delay?: number;
+      }
+
+      function DepositCard({
+        label,
+        lineColor,
+        gradientId,
+        accent = false,
+        delay = 0,
+      }: DepositCardProps) {
+        const first = 10;
+        const last = 8;
+        const isUpward = last >= first;
+        const trendColor = isUpward ? "#22c55e" : "#d4183d";
+
+        return (
+          <article className="deposit-card">
+            <svg>
+              <defs>
+                <linearGradient id={gradientId}>
+                  <stop offset="0%" stopColor={lineColor} stopOpacity={0.18} />
+                  <stop offset="100%" stopColor={lineColor} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <path stroke={trendColor} />
+            </svg>
+          </article>
+        );
+      }
+
+      export function DepositsBreakdown() {
+        return (
+          <section>
+            <DepositCard
+              label="Virtual"
+              lineColor="#e5e5e5"
+              gradientId="spark-virtual"
+              accent
+              delay={0.65}
+            />
+            <DepositCard
+              label="Offshore"
+              lineColor="#888"
+              gradientId="spark-offshore"
+              delay={0.72}
+            />
+          </section>
+        );
+      }
+    `,
+  });
+
+  const result = await debugApplyDirectionalTrendEditForTest({
+    projectDir,
+    allowedFiles: ["src/app/components/DepositsBreakdown.tsx"],
+    intent: {
+      kind: "set-directional-trend-colors",
+      summary: "Color only this selected sparkline by direction.",
+      target: "Virtual sparkline",
+      requestedValue: JSON.stringify({
+        upColor: "#22c55e",
+        downColor: "#ef4444",
+        lineOnly: true,
+      }),
+      parameters: {
+        upColor: "#22c55e",
+        downColor: "#ef4444",
+        lineOnly: true,
+      },
+    },
+    selectionTarget: {
+      targetId: "target-6",
+      fingerprint: "path::virtual-card::stroke",
+      route: "/",
+      label: "",
+      summary: "Selected repeated sparkline instance",
+      sourceFilePath: "src/app/components/DepositsBreakdown.tsx",
+      sourceCandidates: [
+        {
+          path: "src/app/components/DepositsBreakdown.tsx",
+          score: 245,
+          reason: "matches repeated sparkline component",
+          matchedTerms: ["deposits", "sparkline", "virtual"],
+        },
+      ],
+      confidence: 0.93,
+      componentName: "Deposits Breakdown",
+      sectionName: "Deposits Breakdown",
+      repeatGroup: "deposit-card",
+      instanceScope: ".deposit-card:nth-of-type(1)",
+      instanceIndex: 1,
+      scopeMode: "instance",
+      visualType: "chart-line",
+      resolvedHandles: [
+        {
+          key: "line-color",
+          label: "Line color",
+          confidence: 0.97,
+          currentValue: "#8b949e",
+        },
+      ],
+      editableCapabilities: [{ key: "line-color", label: "Line color", confidence: 0.97 }],
+      payload: createSelection({
+        nearestFramerName: null,
+        contextTexts: ["Deposits", "$9.80M"],
+        instanceIndex: 1,
+        repeatKey: "deposit-card",
+      }),
+    },
+  });
+
+  assert.ok(result);
+  assert.match(result?.changedFiles[0]?.content || "", /const trendColor = isUpward \? upTrendColor : downTrendColor;/);
+  assert.match(result?.changedFiles[0]?.content || "", /<DepositCard[\s\S]*label="Virtual"[\s\S]*upTrendColor="#22c55e"[\s\S]*downTrendColor="#ef4444"/);
+  assert.doesNotMatch(result?.changedFiles[0]?.content || "", /<DepositCard[\s\S]*label="Offshore"[\s\S]*upTrendColor="#22c55e"/);
+});
