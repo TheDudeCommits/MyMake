@@ -775,6 +775,13 @@ function scoreFileCandidate(params: {
       score += 20;
       reasons.push("contains chart fill styling");
     }
+    if (
+      params.selection.visualType === "chart-bar" &&
+      /\b(barchart|bar chart|<bar\b|<cell\b|fill=|revenue overview)\b/i.test(normalizedContent)
+    ) {
+      score += 30;
+      reasons.push("contains chart bar styling");
+    }
     if (params.selection.attributes.stroke && params.content?.includes(params.selection.attributes.stroke)) {
       score += 22;
       reasons.push("contains current stroke value");
@@ -806,6 +813,17 @@ function scoreFileCandidate(params: {
     ) {
       score -= 28;
       reasons.push("route file delegates chart rendering to a child component");
+    }
+    if (
+      params.selection.visualType === "chart-bar" &&
+      params.routeCandidates.has(params.filePath) &&
+      /\b(import\s+\{[^}]*revenuechart[^}]*\}|<RevenueChart\b|export default function App\b)/i.test(
+        params.content || "",
+      ) &&
+      !/\b(barchart|<bar\b|<cell\b)\b/i.test(normalizedContent)
+    ) {
+      score -= 28;
+      reasons.push("route file delegates bar rendering to a child component");
     }
   }
 
@@ -1343,6 +1361,39 @@ function extractDirectionalTrendInstruction(prompt: string): {
   };
 }
 
+function extractChartBarNormalizationInstruction(prompt: string): {
+  removeColor: string | null;
+  preferNeutralPalette: boolean;
+} | null {
+  const normalized = prompt.toLowerCase();
+  const mentionsBars = /\b(bar|bars|column|columns)\b/.test(normalized);
+  const mentionsChartContext =
+    /\b(chart|revenue overview|histogram)\b/.test(normalized) || mentionsBars;
+  if (!mentionsChartContext) {
+    return null;
+  }
+
+  const prefersNeutralPalette =
+    /\b(neutral|subtle|gradual|muted|tonal|restrained|consistent|same)\b/.test(normalized) ||
+    /\bmatch\b[\s\S]{0,20}\b(bar|bars|others|other bars)\b/.test(normalized);
+  const removeAccent =
+    /\b(remove|without|no|drop)\b[\s\S]{0,18}\b(red|highlight|accent)\b/.test(normalized) ||
+    /\buse the same\b[\s\S]{0,24}\b(bar|bars)\b/.test(normalized);
+
+  if (!prefersNeutralPalette && !removeAccent) {
+    return null;
+  }
+
+  const removeColorMatch = prompt.match(
+    /\b(?:remove|without|no|drop)\b[\s\S]{0,18}?(#[0-9a-f]{3,8}\b|red|green|blue|white|black|gray|grey|orange|yellow|purple|pink|emerald|teal|cyan)\b/i,
+  );
+
+  return {
+    removeColor: normalizeColorToken(removeColorMatch?.[1] || null),
+    preferNeutralPalette: prefersNeutralPalette || removeAccent,
+  };
+}
+
 function resolveEditIntent(params: {
   prompt: string;
   target: SelectionTarget | null;
@@ -1369,7 +1420,12 @@ function resolveEditIntent(params: {
     return { kind: "unknown", confidence: 0.18, summary: "No stable target resolved yet." };
   }
 
-  if (/\b(remove|delete|hide)\b/.test(normalized)) {
+  if (
+    /\b(remove|delete|hide)\b/.test(normalized) &&
+    !/\b(remove|without|no|drop)\b[\s\S]{0,18}\b(red|green|blue|white|black|gray|grey|orange|yellow|purple|pink|emerald|teal|cyan|highlight|accent|fill|background|shade|gradient)\b/.test(
+      normalized,
+    )
+  ) {
     return {
       kind: "set-visibility",
       confidence: 0.92,
@@ -1405,6 +1461,24 @@ function resolveEditIntent(params: {
       confidence: 0.95,
       requestedValue: JSON.stringify(directionalTrendInstruction),
       summary: "Update upward and downward trend line colors for the selected chart.",
+    };
+  }
+
+  const chartBarNormalizationInstruction = extractChartBarNormalizationInstruction(prompt);
+  if (
+    chartBarNormalizationInstruction &&
+    target &&
+    (target.visualType === "chart-bar" ||
+      Boolean(target.resolvedHandles.some((handle) => handle.key === "fill-color")) ||
+      /\b(bar|bars|revenue overview|barchart|bar chart)\b/i.test(
+        [target.summary, target.componentName, target.sectionName].filter(Boolean).join(" "),
+      ))
+  ) {
+    return {
+      kind: "normalize-chart-bars",
+      confidence: 0.94,
+      requestedValue: JSON.stringify(chartBarNormalizationInstruction),
+      summary: "Normalize the selected chart bars and remove the highlighted accent bar.",
     };
   }
 

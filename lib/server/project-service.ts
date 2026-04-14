@@ -2621,6 +2621,39 @@ function parseDirectionalTrendIntentValue(intent: EditIntent): {
   }
 }
 
+function parseChartBarNormalizationIntentValue(intent: EditIntent): {
+  removeColor: string | null;
+  preferNeutralPalette: boolean;
+} | null {
+  if (intent.kind !== "normalize-chart-bars") {
+    return null;
+  }
+
+  if (!intent.requestedValue) {
+    return {
+      removeColor: null,
+      preferNeutralPalette: true,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(intent.requestedValue) as {
+      removeColor?: string | null;
+      preferNeutralPalette?: boolean;
+    };
+
+    return {
+      removeColor: parsed.removeColor || null,
+      preferNeutralPalette: parsed.preferNeutralPalette !== false,
+    };
+  } catch {
+    return {
+      removeColor: null,
+      preferNeutralPalette: true,
+    };
+  }
+}
+
 function inferSelectedInstanceLabel(selectionTarget: SelectionTarget | null, content: string): string | null {
   if (!selectionTarget) {
     return null;
@@ -2978,6 +3011,73 @@ async function tryApplyDirectionalTrendEdit(params: {
   return null;
 }
 
+async function tryApplyChartBarNormalizationEdit(params: {
+  projectDir: string;
+  selectionTarget: SelectionTarget | null;
+  intent: EditIntent;
+  allowedFiles: string[];
+}): Promise<
+  | {
+      summary: string;
+      warnings: string[];
+      changedFiles: Array<{ path: string; content: string; reason?: string }>;
+      rawResponse: string | null;
+    }
+  | null
+> {
+  const instruction = parseChartBarNormalizationIntentValue(params.intent);
+  if (!params.selectionTarget || !instruction) {
+    return null;
+  }
+
+  for (const filePath of params.allowedFiles) {
+    const absolutePath = resolveInsideRoot(params.projectDir, filePath);
+    if (!isTextLikeFile(absolutePath)) {
+      continue;
+    }
+
+    const currentContent = await fs.readFile(absolutePath, "utf8");
+    let nextContent = currentContent;
+
+    nextContent = nextContent.replace(
+      /fill=\{index === data\.length - 1 \? ["'][^"']+["'] : ([^}]+)\}/g,
+      "fill={$1}",
+    );
+    nextContent = nextContent.replace(
+      /fill=\{isLast \? ["'][^"']+["'] : ([^}]+)\}/g,
+      "fill={$1}",
+    );
+    nextContent = nextContent.replace(
+      /\s*const isLast = index === data\.length - 1;\s*\n\s*if \(isLast\) \{[\s\S]*?return\s*(?:\(\s*)?<Cell[\s\S]*?fill=["'][^"']+["'][\s\S]*?\/>\s*(?:\)\s*)?;\s*\}\s*/g,
+      "\n",
+    );
+    nextContent = nextContent.replace(
+      /\n{3,}/g,
+      "\n\n",
+    );
+
+    if (nextContent === currentContent) {
+      continue;
+    }
+
+    return {
+      summary:
+        "Removed the one-off accent bar and kept the selected revenue bars on the same restrained neutral palette.",
+      warnings: [],
+      changedFiles: [
+        {
+          path: filePath,
+          content: nextContent,
+          reason: params.intent.summary,
+        },
+      ],
+      rawResponse: null,
+    };
+  }
+
+  return null;
+}
+
 export async function debugApplyDirectionalTrendEditForTest(params: {
   projectDir: string;
   selectionTarget: SelectionTarget | null;
@@ -2985,6 +3085,15 @@ export async function debugApplyDirectionalTrendEditForTest(params: {
   allowedFiles: string[];
 }) {
   return tryApplyDirectionalTrendEdit(params);
+}
+
+export async function debugApplyChartBarNormalizationEditForTest(params: {
+  projectDir: string;
+  selectionTarget: SelectionTarget | null;
+  intent: EditIntent;
+  allowedFiles: string[];
+}) {
+  return tryApplyChartBarNormalizationEdit(params);
 }
 
 async function tryApplyDeterministicEdit(params: {
@@ -3016,11 +3125,21 @@ async function tryApplyDeterministicEdit(params: {
   if (
     params.intent.kind === "set-line-color" ||
     params.intent.kind === "set-directional-trend-colors" ||
+    params.intent.kind === "normalize-chart-bars" ||
     params.intent.kind === "set-fill-color" ||
     params.intent.kind === "set-background-color"
   ) {
     if (params.intent.kind === "set-directional-trend-colors") {
       return tryApplyDirectionalTrendEdit({
+        projectDir: params.projectDir,
+        selectionTarget: params.selectionTarget,
+        intent: params.intent,
+        allowedFiles: params.candidateFiles,
+      });
+    }
+
+    if (params.intent.kind === "normalize-chart-bars") {
+      return tryApplyChartBarNormalizationEdit({
         projectDir: params.projectDir,
         selectionTarget: params.selectionTarget,
         intent: params.intent,
@@ -3097,6 +3216,38 @@ function didDirectionalTrendEditTargetSelection(params: {
   return globalChangeDetected;
 }
 
+function didChartBarNormalizationTargetSelection(params: {
+  changedFiles: Array<{ path: string; content: string; reason?: string }>;
+  instruction: { removeColor: string | null; preferNeutralPalette: boolean };
+}): boolean {
+  const { changedFiles, instruction } = params;
+
+  return changedFiles.some((file) => {
+    const hasBarCells = /<Bar\b[\s\S]*?<Cell\b/i.test(file.content);
+    if (!hasBarCells) {
+      return false;
+    }
+
+    const removedConditionalHighlight =
+      !/fill=\{index === data\.length - 1 \? ["'][^"']+["'] : [^}]+\}/.test(file.content) &&
+      !/fill=\{isLast \? ["'][^"']+["'] : [^}]+\}/.test(file.content) &&
+      !/if \(isLast\) \{[\s\S]*?return\s*(?:\(\s*)?<Cell[\s\S]*?fill=["'][^"']+["'][\s\S]*?\/>\s*(?:\)\s*)?;\s*\}/.test(
+        file.content,
+      );
+    const retainsBarFillLogic = /<Cell\b[\s\S]*fill=/.test(file.content);
+    const removedSpecifiedAccent = instruction.removeColor
+      ? !new RegExp(
+          `(?:fill=\\{(?:index === data\\.length - 1|isLast) \\?|if \\(isLast\\)[\\s\\S]{0,180}?fill=["'])${escapeRegExp(
+            instruction.removeColor,
+          )}`,
+          "i",
+        ).test(file.content)
+      : true;
+
+    return removedConditionalHighlight && retainsBarFillLogic && removedSpecifiedAccent;
+  });
+}
+
 function validateTargetPersistence(params: {
   changedFiles: Array<{ path: string; content: string; reason?: string }>;
   selectionTarget: SelectionTarget | null;
@@ -3124,6 +3275,15 @@ function validateTargetPersistence(params: {
         (filePath) =>
           filePath === params.selectionTarget?.sourceFilePath ||
           params.selectionTarget?.sourceCandidates.some((candidate) => candidate.path === filePath),
+      );
+    } else if (params.editPlan.intent.kind === "normalize-chart-bars") {
+      const normalizationInstruction = parseChartBarNormalizationIntentValue(params.editPlan.intent);
+      changedIntendedTarget = Boolean(
+        normalizationInstruction &&
+          didChartBarNormalizationTargetSelection({
+            changedFiles: params.changedFiles,
+            instruction: normalizationInstruction,
+          }),
       );
     } else if (
       params.editPlan.intent.kind === "set-line-color" ||

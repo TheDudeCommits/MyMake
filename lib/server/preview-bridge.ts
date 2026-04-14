@@ -265,18 +265,18 @@ export function buildPreviewBridgeScript(projectId: string): string {
           return element;
         }
 
-        const strokeCandidate = element.querySelector(
-          'svg path[stroke], svg polyline[stroke], svg line[stroke], svg circle[stroke], svg rect[stroke], svg polygon[stroke]',
-        );
-        if (strokeCandidate instanceof Element) {
-          return strokeCandidate;
-        }
-
         const fillCandidate = element.querySelector(
           'svg path[fill]:not([fill="none"]), svg polygon[fill]:not([fill="none"]), svg rect[fill]:not([fill="none"])',
         );
         if (fillCandidate instanceof Element) {
           return fillCandidate;
+        }
+
+        const strokeCandidate = element.querySelector(
+          'svg path[stroke], svg polyline[stroke], svg line[stroke], svg circle[stroke], svg rect[stroke], svg polygon[stroke]',
+        );
+        if (strokeCandidate instanceof Element) {
+          return strokeCandidate;
         }
 
         const svgRoot = element.querySelector("svg");
@@ -375,6 +375,12 @@ export function buildPreviewBridgeScript(projectId: string): string {
         }
         if (tagName === "svg") {
           return "vector";
+        }
+        if (tagName === "rect" && (parentTag === "svg" || representative.closest("svg"))) {
+          const hasFill = representative.getAttribute("fill");
+          if (hasFill && hasFill !== "none") {
+            return "chart-bar";
+          }
         }
         if (tagName === "path" || tagName === "line" || tagName === "polyline") {
           if (parentTag === "svg" || representative.closest("svg")) {

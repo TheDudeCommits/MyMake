@@ -35,6 +35,7 @@ export type EditIntentKind =
   | "replace-text"
   | "set-line-color"
   | "set-directional-trend-colors"
+  | "normalize-chart-bars"
   | "set-fill-color"
   | "set-background-color"
   | "set-spacing"

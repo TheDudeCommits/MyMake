@@ -9,7 +9,10 @@ import {
   buildSelectionTarget,
   type ContextGraphResult,
 } from "@/lib/server/project-intelligence";
-import { debugApplyDirectionalTrendEditForTest } from "@/lib/server/project-service";
+import {
+  debugApplyChartBarNormalizationEditForTest,
+  debugApplyDirectionalTrendEditForTest,
+} from "@/lib/server/project-service";
 import type { SelectionPayload, SelectionTarget } from "@/lib/types";
 
 async function createTempProject(structure: Record<string, string>) {
@@ -334,6 +337,69 @@ test("buildEditPlan routes directional chart-line prompts through the determinis
   });
 
   assert.equal(plan.intent.kind, "set-directional-trend-colors");
+  assert.equal(plan.lane, "deterministic");
+  assert.equal(plan.strategy, "direct-property");
+});
+
+test("buildEditPlan routes bar-chart normalization prompts through the deterministic lane", async () => {
+  const selectionTarget = {
+    targetId: "target-bar-1",
+    fingerprint: "rect::revenue-chart::bar",
+    route: "/",
+    label: "Revenue Overview",
+    summary: "Revenue Overview / Monthly revenue breakdown / Dec",
+    sourceFilePath: "src/app/components/RevenueChart.tsx",
+    sourceCandidates: [
+      {
+        path: "src/app/components/RevenueChart.tsx",
+        score: 226,
+        reason: "matches React source hint; contains chart bar styling",
+        matchedTerms: ["revenue", "bars", "chart"],
+      },
+    ],
+    confidence: 0.94,
+    componentName: "Revenue Chart",
+    sectionName: "Revenue Overview",
+    repeatGroup: "bar",
+    instanceScope: ".recharts-bar-rectangles > rect:nth-of-type(12)",
+    instanceIndex: 12,
+    scopeMode: "instance",
+    visualType: "chart-bar",
+    resolvedHandles: [
+      {
+        key: "fill-color",
+        label: "Fill color",
+        confidence: 0.96,
+        currentValue: "#d4183d",
+      },
+    ],
+    editableCapabilities: [{ key: "fill-color", label: "Fill color", confidence: 0.96 }],
+    payload: createSelection({
+      tagName: "rect",
+      selector: ".recharts-bar-rectangles > rect:nth-of-type(12)",
+      scopeSelector: ".recharts-bar-rectangles",
+      scopedSelector: "rect:nth-of-type(12)",
+      attributes: { fill: "#d4183d" },
+      editableProperties: ["fill-color", "visibility", "layout"],
+      textContent: "",
+      visualType: "chart-bar",
+      contextTexts: ["Revenue Overview", "Monthly revenue breakdown", "Dec"],
+      reactComponentStack: ["RevenueChart", "App"],
+      reactSourceHints: ["RevenueChart.tsx", "RevenueChart"],
+    }),
+  } satisfies SelectionTarget;
+
+  const plan = buildEditPlan({
+    currentFilePath: "src/app/components/RevenueChart.tsx",
+    currentFileContent: '<Cell fill={index === data.length - 1 ? "#d4183d" : fill} />',
+    prompt: "Use the same subtle neutral colors for these bars and remove the red highlight.",
+    runtime: "vite",
+    selectionTarget,
+    contextGraph: createContextGraph(["src/app/components/RevenueChart.tsx"], selectionTarget),
+    hasStaticEditableSupport: false,
+  });
+
+  assert.equal(plan.intent.kind, "normalize-chart-bars");
   assert.equal(plan.lane, "deterministic");
   assert.equal(plan.strategy, "direct-property");
 });
@@ -697,4 +763,95 @@ test("directional trend deterministic edits support inline DepositCard trendColo
   assert.match(result?.changedFiles[0]?.content || "", /const trendColor = isUpward \? upTrendColor : downTrendColor;/);
   assert.match(result?.changedFiles[0]?.content || "", /<DepositCard[\s\S]*label="Virtual"[\s\S]*upTrendColor="#22c55e"[\s\S]*downTrendColor="#ef4444"/);
   assert.doesNotMatch(result?.changedFiles[0]?.content || "", /<DepositCard[\s\S]*label="Offshore"[\s\S]*upTrendColor="#22c55e"/);
+});
+
+test("chart bar normalization removes a one-off highlighted last bar while keeping the neutral palette", async () => {
+  const projectDir = await createTempProject({
+    "src/app/components/RevenueChart.tsx": `
+      export function RevenueChart({ data }: { data: Array<{ revenue: number }> }) {
+        const maxRevenue = Math.max(...data.map((d) => d.revenue || 0), 1);
+        return (
+          <Bar dataKey="revenue" radius={[4, 4, 0, 0]}>
+            {data.map((entry, index) => {
+              const isLast = index === data.length - 1;
+
+              if (isLast) {
+                return <Cell key={\`cell-\${index}\`} fill="#d4183d" />;
+              }
+
+              const ratio = (entry.revenue || 0) / maxRevenue;
+              const fill = mixHex("#2a2a2a", "#cbced4", ratio * 0.6);
+
+              return <Cell key={\`cell-\${index}\`} fill={fill} />;
+            })}
+          </Bar>
+        );
+      }
+    `,
+  });
+
+  const result = await debugApplyChartBarNormalizationEditForTest({
+    projectDir,
+    allowedFiles: ["src/app/components/RevenueChart.tsx"],
+    intent: {
+      kind: "normalize-chart-bars",
+      confidence: 0.95,
+      requestedValue: JSON.stringify({
+        removeColor: "#d4183d",
+        preferNeutralPalette: true,
+      }),
+      summary: "Normalize the selected revenue bars and remove the highlighted accent bar.",
+    },
+    selectionTarget: {
+      targetId: "target-bar-2",
+      fingerprint: "rect::revenue-chart::bar",
+      route: "/",
+      label: "Revenue Overview",
+      summary: "Revenue Overview / Monthly revenue breakdown / Dec",
+      sourceFilePath: "src/app/components/RevenueChart.tsx",
+      sourceCandidates: [
+        {
+          path: "src/app/components/RevenueChart.tsx",
+          score: 226,
+          reason: "contains chart bar styling",
+          matchedTerms: ["revenue", "bars", "chart"],
+        },
+      ],
+      confidence: 0.94,
+      componentName: "Revenue Chart",
+      sectionName: "Revenue Overview",
+      repeatGroup: "bar",
+      instanceScope: ".recharts-bar-rectangles > rect:nth-of-type(12)",
+      instanceIndex: 12,
+      scopeMode: "instance",
+      visualType: "chart-bar",
+      resolvedHandles: [
+        {
+          key: "fill-color",
+          label: "Fill color",
+          confidence: 0.96,
+          currentValue: "#d4183d",
+        },
+      ],
+      editableCapabilities: [{ key: "fill-color", label: "Fill color", confidence: 0.96 }],
+      payload: createSelection({
+        tagName: "rect",
+        selector: ".recharts-bar-rectangles > rect:nth-of-type(12)",
+        scopeSelector: ".recharts-bar-rectangles",
+        scopedSelector: "rect:nth-of-type(12)",
+        attributes: { fill: "#d4183d" },
+        editableProperties: ["fill-color", "visibility", "layout"],
+        textContent: "",
+        visualType: "chart-bar",
+        contextTexts: ["Revenue Overview", "Monthly revenue breakdown", "Dec"],
+      }),
+    },
+  });
+
+  assert.ok(result);
+  assert.equal(result?.changedFiles[0]?.path, "src/app/components/RevenueChart.tsx");
+  assert.doesNotMatch(result?.changedFiles[0]?.content || "", /if \(isLast\)/);
+  assert.doesNotMatch(result?.changedFiles[0]?.content || "", /fill="#d4183d"/);
+  assert.match(result?.changedFiles[0]?.content || "", /const fill = mixHex/);
+  assert.match(result?.changedFiles[0]?.content || "", /return <Cell key=\{`cell-\$\{index\}`\} fill=\{fill\} \/>/);
 });
