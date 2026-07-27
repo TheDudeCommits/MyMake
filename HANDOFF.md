@@ -1,7 +1,7 @@
 # MyMake Handoff
 
 Last updated: 2026-04-14
-Repo: [AmirTheDude69/MyMake](https://github.com/AmirTheDude69/MyMake)
+Repo: [TheDudeCommits/MyMake](https://github.com/TheDudeCommits/MyMake)
 Production: [web-production-99795.up.railway.app](https://web-production-99795.up.railway.app)
 
 ## 1. What MyMake Is
