@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import fsp from "node:fs/promises";
 import { Readable } from "node:stream";
 
@@ -12,10 +12,19 @@ export async function GET(
   _request: Request,
   { params }: { params: { projectId: string } },
 ) {
+  let archiveHandle: Awaited<ReturnType<typeof fsp.open>> | null = null;
   try {
     const archivePath = await createProjectExport(params.projectId);
-    const stats = await fsp.stat(archivePath);
-    const nodeStream = fs.createReadStream(archivePath);
+    archiveHandle = await fsp.open(
+      archivePath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+    const stats = await archiveHandle.stat();
+    if (!stats.isFile()) {
+      throw new Error("Could not open the project export.");
+    }
+    const nodeStream = archiveHandle.createReadStream({ autoClose: true });
+    archiveHandle = null;
     nodeStream.on("close", () => {
       void fsp.rm(archivePath, { force: true }).catch(() => undefined);
     });
@@ -28,6 +37,7 @@ export async function GET(
       },
     });
   } catch (error) {
+    await archiveHandle?.close().catch(() => undefined);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Could not export the project." },
       { status: 400 },

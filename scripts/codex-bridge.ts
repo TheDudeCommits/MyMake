@@ -1,7 +1,7 @@
 import archiver from "archiver";
 import AdmZip from "adm-zip";
 import express from "express";
-import { existsSync } from "node:fs";
+import { constants as fsConstants, existsSync } from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +11,9 @@ import { fileURLToPath } from "node:url";
 
 const app = express();
 const port = Number(process.env.MYMAKE_CODEX_BRIDGE_PORT || 8766);
+const editRateLimitWindowMs = 60_000;
+const editRateLimitMaxRequests = 12;
+const editRateBuckets = new Map<string, { count: number; resetAt: number }>();
 const bundledCodexBin = "/Applications/Codex.app/Contents/Resources/codex";
 const trustedCodexBins = [
   bundledCodexBin,
@@ -32,15 +35,42 @@ function resolveTrustedCodexBin(): string {
 const codexBin = resolveTrustedCodexBin();
 const scriptPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(scriptPath), "..");
-const bridgeRoot = path.join(os.homedir(), ".mymake-codex-bridge");
-const projectsRoot = path.join(bridgeRoot, "projects");
-const statePath = path.join(bridgeRoot, "state.json");
-const configPath = path.join(bridgeRoot, "config.json");
-const launchAgentsDir = path.join(os.homedir(), "Library", "LaunchAgents");
+
+function resolveInsideRoot(root: string, relativePath: string): string {
+  if (
+    /[\u0000-\u001f\u007f]/.test(relativePath) ||
+    path.isAbsolute(relativePath) ||
+    /^[\\/]/.test(relativePath) ||
+    /^[A-Za-z]:[\\/]/.test(relativePath)
+  ) {
+    throw new Error("Path must be a safe relative path.");
+  }
+  if (relativePath.split(/[\\/]+/).includes("..")) {
+    throw new Error("Path traversal segments are not allowed.");
+  }
+
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, relativePath.replace(/[\\/]/g, path.sep));
+  const containmentPath = path.relative(resolvedRoot, resolved);
+  if (
+    containmentPath === ".." ||
+    containmentPath.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(containmentPath)
+  ) {
+    throw new Error("Path escapes the bridge root.");
+  }
+  return resolved;
+}
+
+const bridgeRoot = resolveInsideRoot(path.resolve(os.homedir()), ".mymake-codex-bridge");
+const projectsRoot = resolveInsideRoot(bridgeRoot, "projects");
+const statePath = resolveInsideRoot(bridgeRoot, "state.json");
+const configPath = resolveInsideRoot(bridgeRoot, "config.json");
+const launchAgentsDir = resolveInsideRoot(path.resolve(os.homedir()), "Library/LaunchAgents");
 const launchAgentLabel = "com.mymake.codex-bridge";
-const launchAgentPath = path.join(launchAgentsDir, `${launchAgentLabel}.plist`);
-const bridgeStdoutLogPath = path.join(bridgeRoot, "codex-bridge.log");
-const bridgeStderrLogPath = path.join(bridgeRoot, "codex-bridge.error.log");
+const launchAgentPath = resolveInsideRoot(launchAgentsDir, `${launchAgentLabel}.plist`);
+const bridgeStdoutLogPath = resolveInsideRoot(bridgeRoot, "codex-bridge.log");
+const bridgeStderrLogPath = resolveInsideRoot(bridgeRoot, "codex-bridge.error.log");
 
 type BridgeStartMode = "always-on" | "codex-app";
 
@@ -91,18 +121,48 @@ type BridgeOpenSessionRequest = {
   projectName?: string;
 };
 
+function enforceEditRateLimit(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+): void {
+  const now = Date.now();
+  const key = req.ip || req.socket.remoteAddress || "local";
+  const current = editRateBuckets.get(key);
+  const bucket =
+    !current || current.resetAt <= now
+      ? { count: 0, resetAt: now + editRateLimitWindowMs }
+      : current;
+
+  if (bucket.count >= editRateLimitMaxRequests) {
+    res.setHeader("Retry-After", String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
+    res.status(429).json({ error: "Too many edit requests. Try again in a moment." });
+    return;
+  }
+
+  bucket.count += 1;
+  editRateBuckets.set(key, bucket);
+  if (editRateBuckets.size > 1000) {
+    for (const [bucketKey, value] of editRateBuckets) {
+      if (value.resetAt <= now) {
+        editRateBuckets.delete(bucketKey);
+      }
+    }
+  }
+  next();
+}
+
 function stateKey(projectId: string, userId?: string | null): string {
   return `${userId || "anonymous"}:${projectId}`;
 }
 
 function workspaceDirFor(projectId: string, userId?: string | null): string {
-  const slug = stateKey(projectId, userId).replace(/[^a-zA-Z0-9:_-]+/g, "_");
-  return path.join(projectsRoot, slug, "workspace");
+  return resolveInsideRoot(projectDirFor(projectId, userId), "workspace");
 }
 
 function projectDirFor(projectId: string, userId?: string | null): string {
-  const slug = stateKey(projectId, userId).replace(/[^a-zA-Z0-9:_-]+/g, "_");
-  return path.join(projectsRoot, slug);
+  const slug = createHash("sha256").update(stateKey(projectId, userId)).digest("hex").slice(0, 32);
+  return resolveInsideRoot(projectsRoot, slug);
 }
 
 function nowIso(): string {
@@ -219,16 +279,11 @@ async function extractZipBufferToDirectory(buffer: Buffer, destination: string):
 
   const archive = new AdmZip(buffer);
   for (const entry of archive.getEntries()) {
-    const normalizedPath = path
-      .normalize(entry.entryName)
-      .replace(/^(\.\.(\/|\\|$))+/, "")
-      .replace(/^[/\\]+/, "");
-
-    if (!normalizedPath || normalizedPath.startsWith("..")) {
+    if (!entry.entryName || entry.entryName.includes("\u0000")) {
       continue;
     }
 
-    const outputPath = path.join(destination, normalizedPath);
+    const outputPath = resolveInsideRoot(destination, entry.entryName);
     if (entry.isDirectory) {
       await fsp.mkdir(outputPath, { recursive: true });
       continue;
@@ -258,18 +313,37 @@ async function snapshotWorkspace(directory: string): Promise<Map<string, string>
   async function walk(currentDir: string) {
     const entries = await fsp.readdir(currentDir, { withFileTypes: true });
     for (const entry of entries) {
-      const absolutePath = path.join(currentDir, entry.name);
-      const relativePath = path.relative(directory, absolutePath).split(path.sep).join("/");
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      const relativePath = path
+        .join(path.relative(directory, currentDir), entry.name)
+        .split(path.sep)
+        .join("/");
       if (shouldIgnoreExportPath(relativePath)) {
         continue;
       }
+      const absolutePath = resolveInsideRoot(directory, relativePath);
 
       if (entry.isDirectory()) {
         await walk(absolutePath);
         continue;
       }
 
-      const buffer = await fsp.readFile(absolutePath);
+      const handle = await fsp.open(
+        absolutePath,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      );
+      let buffer: Buffer;
+      try {
+        const stats = await handle.stat();
+        if (!stats.isFile()) {
+          continue;
+        }
+        buffer = await handle.readFile();
+      } finally {
+        await handle.close();
+      }
       snapshot.set(relativePath, createHash("sha256").update(buffer).digest("hex"));
     }
   }
@@ -428,8 +502,8 @@ function xmlEscape(value: string): string {
 
 async function resolveTsxCliPath(): Promise<string> {
   const candidates = [
-    path.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs"),
-    path.join(projectRoot, "node_modules", ".bin", "tsx"),
+    resolveInsideRoot(projectRoot, "node_modules/tsx/dist/cli.mjs"),
+    resolveInsideRoot(projectRoot, "node_modules/.bin/tsx"),
   ];
 
   for (const candidate of candidates) {
@@ -887,10 +961,11 @@ app.put(
   },
 );
 
-app.post("/v1/projects/:projectId/edit", async (req, res) => {
+app.post("/v1/projects/:projectId/edit", enforceEditRateLimit, async (req, res) => {
   const request = req.body as BridgeEditRequest;
+  const projectId = String(req.params.projectId);
   const userId = request.userId || null;
-  const key = stateKey(req.params.projectId, userId);
+  const key = stateKey(projectId, userId);
   const state = await loadState();
   const projectState = state.projects[key];
 
@@ -901,7 +976,7 @@ app.post("/v1/projects/:projectId/edit", async (req, res) => {
     return;
   }
 
-  const workspaceDir = workspaceDirFor(req.params.projectId, userId);
+  const workspaceDir = workspaceDirFor(projectId, userId);
   const before = await snapshotWorkspace(workspaceDir);
   const result = await runCodexTurn({
     workspaceDir,
@@ -920,7 +995,7 @@ app.post("/v1/projects/:projectId/edit", async (req, res) => {
 
   res.json({
     ok: true,
-    projectId: req.params.projectId,
+    projectId,
     threadId: result.threadId,
     summary: result.summary,
     changedFiles,
@@ -980,13 +1055,16 @@ app.get("/v1/projects/:projectId/export", async (req, res) => {
 
   const workspaceDir = workspaceDirFor(req.params.projectId, userId);
   res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="${req.params.projectId}.zip"`);
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="project-${encodeURIComponent(req.params.projectId)}.zip"`,
+  );
   await streamWorkspaceZip(workspaceDir, res);
 });
 
 ensureBridgeStorage()
   .then(() => {
-    app.listen(port, () => {
+    app.listen(port, "127.0.0.1", () => {
       console.log(`MyMake Codex bridge listening on http://127.0.0.1:${port}`);
     });
   })

@@ -10,6 +10,7 @@ import {
   normalizeImportedProject,
   runtimeRequiresDependencyInstall,
 } from "@/lib/server/project-validation";
+import { resolveInsideRoot } from "@/lib/server/path-utils";
 import { getProjectPaths } from "@/lib/server/storage";
 import type { PackageManager } from "@/lib/types";
 
@@ -215,17 +216,17 @@ async function cleanupProjectInstallArtifacts(projectId: string): Promise<void> 
   const paths = getProjectPaths(projectId);
 
   await Promise.all([
-    fs.rm(path.join(paths.current, "node_modules"), { recursive: true, force: true }),
-    fs.rm(path.join(paths.current, ".next"), { recursive: true, force: true }),
-    fs.rm(path.join(paths.root, "unpacked"), { recursive: true, force: true }),
+    fs.rm(resolveInsideRoot(paths.current, "node_modules"), { recursive: true, force: true }),
+    fs.rm(resolveInsideRoot(paths.current, ".next"), { recursive: true, force: true }),
+    fs.rm(resolveInsideRoot(paths.root, "unpacked"), { recursive: true, force: true }),
   ]);
 
   const rootEntries = await fs.readdir(paths.root).catch(() => [] as string[]);
   await Promise.all(
     rootEntries
-      .filter((entry) => /^export-\d+\.zip$/.test(entry))
+      .filter((entry) => /^export-\d+(?:-[A-Za-z0-9_-]+)?\.zip$/.test(entry))
       .map((entry) =>
-        fs.rm(path.join(paths.root, entry), {
+        fs.rm(resolveInsideRoot(paths.root, entry), {
           force: true,
         }),
       ),
@@ -259,7 +260,7 @@ async function ensureProjectDependenciesInstalled(project: {
     return;
   }
 
-  const nodeModulesPath = path.join(project.extracted_path, "node_modules");
+  const nodeModulesPath = resolveInsideRoot(project.extracted_path, "node_modules");
   if (await pathExists(nodeModulesPath)) {
     return;
   }

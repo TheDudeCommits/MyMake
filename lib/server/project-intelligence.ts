@@ -311,14 +311,18 @@ async function walkProjectFiles(
     if (HIDDEN_DIRS.has(entry.name) || entry.name === ".DS_Store") {
       continue;
     }
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
 
-    const absolutePath = path.join(current, entry.name);
+    const relativePath = toPosixPath(path.join(path.relative(root, current), entry.name));
+    const absolutePath = resolveInsideRoot(root, relativePath);
     if (entry.isDirectory()) {
       await walkProjectFiles(root, absolutePath, output);
       continue;
     }
 
-    output.push(toPosixPath(path.relative(root, absolutePath)));
+    output.push(relativePath);
   }
 
   return output.sort();
@@ -347,7 +351,7 @@ async function fileExists(targetPath: string): Promise<boolean> {
 }
 
 async function ensureInternalDir(projectDir: string): Promise<string> {
-  const targetDir = path.join(projectDir, MYMAKE_DIR);
+  const targetDir = resolveInsideRoot(projectDir, MYMAKE_DIR);
   await fs.mkdir(targetDir, { recursive: true });
   return targetDir;
 }

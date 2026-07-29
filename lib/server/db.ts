@@ -1,6 +1,5 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
-import path from "node:path";
 
 import { getEnv } from "@/lib/server/env";
 
@@ -248,7 +247,7 @@ export function getDb(): Database.Database {
   }
 
   const dbPath = getEnv().databasePath;
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  fs.mkdirSync(getEnv().storageRoot, { recursive: true });
 
   database = new Database(dbPath);
   database.pragma("journal_mode = WAL");

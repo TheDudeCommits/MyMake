@@ -18,6 +18,22 @@ function tempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+function readTextFileOrNull(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 function createFileResponse(title: string): GetFileResponse {
   return {
     document: {
@@ -331,7 +347,7 @@ test("restoreCheckpoint restores local state and calls plugin restoreVersion", a
   const conversationPath = path.join(projectDir, "ai_chat.json");
   const memoryPath = path.join(projectDir, "project-memory.md");
   const originalConversation = fs.readFileSync(conversationPath, "utf8");
-  const originalMemory = fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath, "utf8") : null;
+  const originalMemory = readTextFileOrNull(memoryPath);
 
   fs.writeFileSync(
     conversationPath,
@@ -344,10 +360,7 @@ test("restoreCheckpoint restores local state and calls plugin restoreVersion", a
 
   assert.equal(plugin.restoreVersionCalls.at(-1), result.checkpoint?.figmaVersionId);
   assert.equal(fs.readFileSync(conversationPath, "utf8"), originalConversation);
-  assert.equal(
-    fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath, "utf8") : null,
-    originalMemory,
-  );
+  assert.equal(readTextFileOrNull(memoryPath), originalMemory);
 });
 
 test("handlePrompt rolls back to the safety version when plugin execution fails", async () => {

@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { resolveInsideRoot } from "@/lib/server/path-utils";
+
 interface EnvConfig {
   anthropicApiKey?: string;
   githubClientId?: string;
@@ -19,15 +21,29 @@ interface EnvConfig {
 
 let cachedEnv: EnvConfig | null = null;
 
+function normalizeConfiguredPath(value: string, label: string): string {
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`${label} contains control characters.`);
+  }
+  return path.resolve(value);
+}
+
 export function getEnv(): EnvConfig {
   if (cachedEnv) {
     return cachedEnv;
   }
 
-  const storageRoot =
-    process.env.STORAGE_ROOT || path.join(process.cwd(), ".mymake-data");
-  const databasePath =
-    process.env.SQLITE_DB_PATH || path.join(storageRoot, "mymake.sqlite");
+  const storageRoot = normalizeConfiguredPath(
+    process.env.STORAGE_ROOT || path.join(process.cwd(), ".mymake-data"),
+    "STORAGE_ROOT",
+  );
+  const configuredDatabasePath = process.env.SQLITE_DB_PATH
+    ? normalizeConfiguredPath(process.env.SQLITE_DB_PATH, "SQLITE_DB_PATH")
+    : resolveInsideRoot(storageRoot, "mymake.sqlite");
+  const databasePath = resolveInsideRoot(
+    storageRoot,
+    path.relative(storageRoot, configuredDatabasePath),
+  );
 
   cachedEnv = {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,

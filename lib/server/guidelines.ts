@@ -18,6 +18,7 @@ import {
   serializeFigmaDesignContext,
   type FileResponse,
 } from "@/lib/figma/design-context-serializer";
+import { resolveInsideRoot } from "@/lib/server/path-utils";
 
 const DEFAULT_GUIDELINE_BUDGET = 4000;
 const GUIDELINES_FILE = "Guidelines.md";
@@ -144,26 +145,26 @@ export class GuidelineStore {
   readonly rootDir: string;
 
   constructor(options: GuidelineStoreOptions = {}) {
-    this.rootDir = options.rootDir ?? path.join(process.cwd(), "guidelines");
+    this.rootDir = path.resolve(options.rootDir ?? path.join(process.cwd(), "guidelines"));
     this.ensureStructure();
   }
 
   ensureStructure(): void {
     fs.mkdirSync(this.rootDir, { recursive: true });
-    fs.mkdirSync(path.join(this.rootDir, COMPONENTS_DIR), { recursive: true });
-    fs.mkdirSync(path.join(this.rootDir, TOKENS_DIR), { recursive: true });
+    fs.mkdirSync(resolveInsideRoot(this.rootDir, COMPONENTS_DIR), { recursive: true });
+    fs.mkdirSync(resolveInsideRoot(this.rootDir, TOKENS_DIR), { recursive: true });
   }
 
   addGuideline(relativePath: string, content: string): void {
     this.ensureStructure();
     const normalized = normalizeRelativePath(relativePath);
-    const absolutePath = path.join(this.rootDir, normalized);
+    const absolutePath = resolveInsideRoot(this.rootDir, normalized);
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
     fs.writeFileSync(absolutePath, content.trimEnd() + "\n", "utf8");
   }
 
   readGuideline(relativePath: string): string | null {
-    const absolutePath = path.join(this.rootDir, normalizeRelativePath(relativePath));
+    const absolutePath = resolveInsideRoot(this.rootDir, normalizeRelativePath(relativePath));
     if (!fs.existsSync(absolutePath)) {
       return null;
     }
@@ -202,7 +203,7 @@ export class GuidelineStore {
   }
 
   private tryDocument(relativePath: string): GuidelineDocument | null {
-    const absolutePath = path.join(this.rootDir, normalizeRelativePath(relativePath));
+    const absolutePath = resolveInsideRoot(this.rootDir, normalizeRelativePath(relativePath));
     if (!fs.existsSync(absolutePath)) {
       return null;
     }
@@ -211,7 +212,7 @@ export class GuidelineStore {
 
   private toDocument(relativePath: string): GuidelineDocument {
     const normalized = normalizeRelativePath(relativePath);
-    const absolutePath = path.join(this.rootDir, normalized);
+    const absolutePath = resolveInsideRoot(this.rootDir, normalized);
     const content = fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath, "utf8") : "";
     const title = extractTitleFromMarkdown(content) ?? titleFromPath(normalized);
     return {
@@ -540,8 +541,15 @@ function walkMarkdownFiles(rootDir: string, currentDir = rootDir, output: string
     if (entry.name.startsWith(".")) {
       continue;
     }
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
 
-    const absolutePath = path.join(currentDir, entry.name);
+    const relativePath = path
+      .join(path.relative(rootDir, currentDir), entry.name)
+      .split(path.sep)
+      .join("/");
+    const absolutePath = resolveInsideRoot(rootDir, relativePath);
     if (entry.isDirectory()) {
       walkMarkdownFiles(rootDir, absolutePath, output);
       continue;
@@ -556,7 +564,23 @@ function walkMarkdownFiles(rootDir: string, currentDir = rootDir, output: string
 }
 
 function normalizeRelativePath(relativePath: string): string {
-  return path.posix.normalize(relativePath).replace(/^(\.\.\/)+/, "").replace(/^\/+/, "");
+  const portablePath = relativePath.replace(/\\/g, "/");
+  if (portablePath.split("/").includes("..")) {
+    throw new Error("Guideline path must stay inside the guideline store.");
+  }
+  const normalized = path.posix.normalize(portablePath);
+  if (
+    !normalized ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.startsWith("/") ||
+    /^[A-Za-z]:\//.test(normalized) ||
+    /[\u0000-\u001f\u007f]/.test(normalized)
+  ) {
+    throw new Error("Guideline path must stay inside the guideline store.");
+  }
+  return normalized;
 }
 
 function classifyGuideline(relativePath: string): GuidelineKind {

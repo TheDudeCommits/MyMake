@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
-import path from "node:path";
+
+import { resolveInsideRoot } from "@/lib/server/path-utils";
 
 export const OVERRIDES_CONFIG_PATH = "editable/overrides.config.js";
 export const OVERRIDES_ENGINE_PATH = "editable/overrides.engine.js";
@@ -547,9 +548,9 @@ export function getPreferredStaticEditableFile(files: string[]): string | null {
 }
 
 export async function ensureStaticEditableOverridesSupport(projectDir: string): Promise<void> {
-  const configPath = path.join(projectDir, OVERRIDES_CONFIG_PATH);
-  const enginePath = path.join(projectDir, OVERRIDES_ENGINE_PATH);
-  const cssPath = path.join(projectDir, OVERRIDES_CSS_PATH);
+  const configPath = resolveInsideRoot(projectDir, OVERRIDES_CONFIG_PATH);
+  const enginePath = resolveInsideRoot(projectDir, OVERRIDES_ENGINE_PATH);
+  const cssPath = resolveInsideRoot(projectDir, OVERRIDES_CSS_PATH);
 
   if (await pathExists(configPath)) {
     const currentConfig = await fs.readFile(configPath, "utf8");
@@ -567,7 +568,7 @@ export async function ensureStaticEditableOverridesSupport(projectDir: string): 
   }
 
   if (!(await pathExists(cssPath))) {
-    await fs.mkdir(path.dirname(cssPath), { recursive: true });
+    await fs.mkdir(resolveInsideRoot(projectDir, "editable"), { recursive: true });
     await fs.writeFile(
       cssPath,
       "/* Prompt-editable style layer. */\n.is-hidden-by-override { display: none !important; }\n",
@@ -580,7 +581,7 @@ export async function appendElementOverride(
   projectDir: string,
   entry: Record<string, unknown>,
 ): Promise<string> {
-  const configPath = path.join(projectDir, OVERRIDES_CONFIG_PATH);
+  const configPath = resolveInsideRoot(projectDir, OVERRIDES_CONFIG_PATH);
   const currentConfig = await fs.readFile(configPath, "utf8");
   const normalizedConfig = readOverrideConfigValue(currentConfig);
   normalizedConfig.elements = uniqueObjectList([...normalizedConfig.elements, entry]);
@@ -595,7 +596,7 @@ export async function appendGlobalTextReplacement(
   projectDir: string,
   entry: Record<string, unknown>,
 ): Promise<string> {
-  const configPath = path.join(projectDir, OVERRIDES_CONFIG_PATH);
+  const configPath = resolveInsideRoot(projectDir, OVERRIDES_CONFIG_PATH);
   const currentConfig = await fs.readFile(configPath, "utf8");
   const normalizedConfig = readOverrideConfigValue(currentConfig);
   const globalConfig = isPlainObject(normalizedConfig.global) ? { ...normalizedConfig.global } : {};
