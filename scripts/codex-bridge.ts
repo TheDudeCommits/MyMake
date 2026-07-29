@@ -12,9 +12,24 @@ import { fileURLToPath } from "node:url";
 const app = express();
 const port = Number(process.env.MYMAKE_CODEX_BRIDGE_PORT || 8766);
 const bundledCodexBin = "/Applications/Codex.app/Contents/Resources/codex";
-const codexBin =
-  process.env.MYMAKE_CODEX_BIN ||
-  (existsSync(bundledCodexBin) ? bundledCodexBin : "codex");
+const trustedCodexBins = [
+  bundledCodexBin,
+  "/opt/homebrew/bin/codex",
+  "/usr/local/bin/codex",
+  "/usr/bin/codex",
+] as const;
+
+function resolveTrustedCodexBin(): string {
+  const candidate = trustedCodexBins.find((entry) => existsSync(entry));
+  if (!candidate) {
+    throw new Error(
+      "MyMake could not find Codex in a trusted installation location. Install Codex.app or the Codex CLI in /opt/homebrew/bin or /usr/local/bin.",
+    );
+  }
+  return candidate;
+}
+
+const codexBin = resolveTrustedCodexBin();
 const scriptPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(scriptPath), "..");
 const bridgeRoot = path.join(os.homedir(), ".mymake-codex-bridge");
@@ -430,7 +445,6 @@ function buildLaunchAgentPlist(tsxCliPath: string): string {
   const envEntries = {
     PATH: process.env.PATH || "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
     MYMAKE_CODEX_BRIDGE_PORT: String(port),
-    MYMAKE_CODEX_BIN: codexBin,
   };
 
   const programArguments = [process.execPath, tsxCliPath, scriptPath]
