@@ -10,8 +10,9 @@ export const runtime = "nodejs";
 
 export async function POST(
   request: Request,
-  { params }: { params: { projectId: string } },
+  { params }: { params: Promise<{ projectId: string }> },
 ) {
+  const { projectId } = await params;
   try {
     const formData = await request.formData();
     const file = formData.get("file");
@@ -32,7 +33,7 @@ export async function POST(
     const changedFiles = changedFilesRaw ? JSON.parse(changedFilesRaw) : [];
 
     const result = await applyCodexBridgeWorkspace({
-      projectId: params.projectId,
+      projectId,
       zipBuffer: Buffer.from(await file.arrayBuffer()),
       prompt,
       selection,
@@ -40,7 +41,7 @@ export async function POST(
       threadId,
       changedFiles: Array.isArray(changedFiles) ? changedFiles : [],
     });
-    const snapshot = await getDashboardSnapshot(params.projectId);
+    const snapshot = await getDashboardSnapshot(projectId);
 
     return NextResponse.json({
       ...snapshot,
@@ -56,7 +57,7 @@ export async function POST(
     let rawProviderOutput: string | null = null;
 
     try {
-      const workspace = await getWorkspaceSnapshot(params.projectId);
+      const workspace = await getWorkspaceSnapshot(projectId);
       if (workspace.lastValidationResult?.status !== "passed") {
         details = workspace.lastValidationResult?.details || [];
         rawProviderOutput = workspace.lastValidationResult?.rawProviderOutput || null;

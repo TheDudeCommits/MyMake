@@ -6,9 +6,10 @@ export const dynamic = "force-dynamic";
 export default async function Home({
   searchParams,
 }: {
-  searchParams?: Record<string, string | string[] | undefined>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const projectIdParam = searchParams?.projectId;
+  const resolvedSearchParams = searchParams ? await searchParams : undefined;
+  const projectIdParam = resolvedSearchParams?.projectId;
   const projectId = Array.isArray(projectIdParam) ? projectIdParam[0] : projectIdParam;
   const snapshot = await getDashboardSnapshot(projectId);
 

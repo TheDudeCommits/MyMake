@@ -1413,11 +1413,14 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
   const previousRevisionIdRef = useRef<string | null>(null);
   const didHydrateCodexBridgeSettingsRef = useRef(false);
   const refreshCodexBridgeHealthRef =
-    useRef<(options?: { silent?: boolean }) => Promise<CodexBridgeHealth | null>>();
+    useRef<((options?: { silent?: boolean }) => Promise<CodexBridgeHealth | null>) | undefined>(
+      undefined,
+    );
   const refreshCodexProjectStateRef =
     useRef<
-      (projectId: string | null | undefined) => Promise<CodexBridgeProjectStateRecord | null>
-    >();
+      | ((projectId: string | null | undefined) => Promise<CodexBridgeProjectStateRecord | null>)
+      | undefined
+    >(undefined);
 
   const currentProject = snapshot.currentProject;
   const viewer = snapshot.viewer;

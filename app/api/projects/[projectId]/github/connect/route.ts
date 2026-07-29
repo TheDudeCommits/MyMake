@@ -24,25 +24,26 @@ const bodySchema = z.discriminatedUnion("mode", [
 
 export async function POST(
   request: Request,
-  { params }: { params: { projectId: string } },
+  { params }: { params: Promise<{ projectId: string }> },
 ) {
+  const { projectId } = await params;
   try {
     const body = bodySchema.parse(await request.json());
     if (body.mode === "existing") {
       await connectProjectToGitHubRepo({
-        projectId: params.projectId,
+        projectId,
         owner: body.owner,
         repo: body.repo,
       });
     } else {
       await createRepoForProject({
-        projectId: params.projectId,
+        projectId,
         name: body.name,
         isPrivate: body.isPrivate,
       });
     }
 
-    return NextResponse.json(await getDashboardSnapshot(params.projectId));
+    return NextResponse.json(await getDashboardSnapshot(projectId));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Could not connect this project to GitHub." },

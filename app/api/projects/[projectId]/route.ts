@@ -6,10 +6,11 @@ export const runtime = "nodejs";
 
 export async function DELETE(
   _request: Request,
-  { params }: { params: { projectId: string } },
+  { params }: { params: Promise<{ projectId: string }> },
 ) {
+  const { projectId } = await params;
   try {
-    await deleteProject(params.projectId);
+    await deleteProject(projectId);
     return NextResponse.json(await getDashboardSnapshot());
   } catch (error) {
     return NextResponse.json(

@@ -28,14 +28,44 @@ function normalizeConfiguredPath(value: string, label: string): string {
   return path.resolve(value);
 }
 
+/**
+ * Keep administrator-configured storage under one of the application's managed
+ * roots. Railway mounts its persistent volume at /data; local development uses
+ * the application working directory. Normalizing and checking path.relative
+ * prevents sibling-prefix and traversal escapes before any filesystem access.
+ */
+export function resolveConfiguredStorageRoot(value: string): string {
+  const resolvedStorageRoot = normalizeConfiguredPath(value, "STORAGE_ROOT");
+  const applicationRoot = path.resolve(process.cwd());
+  const relativeToApplication = path.relative(applicationRoot, resolvedStorageRoot);
+  if (
+    relativeToApplication !== ".." &&
+    !relativeToApplication.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relativeToApplication)
+  ) {
+    return resolvedStorageRoot;
+  }
+
+  const persistentVolumeRoot = path.resolve(path.parse(applicationRoot).root, "data");
+  const relativeToVolume = path.relative(persistentVolumeRoot, resolvedStorageRoot);
+  if (
+    relativeToVolume !== ".." &&
+    !relativeToVolume.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relativeToVolume)
+  ) {
+    return resolvedStorageRoot;
+  }
+
+  throw new Error("STORAGE_ROOT must be inside the application directory or /data.");
+}
+
 export function getEnv(): EnvConfig {
   if (cachedEnv) {
     return cachedEnv;
   }
 
-  const storageRoot = normalizeConfiguredPath(
+  const storageRoot = resolveConfiguredStorageRoot(
     process.env.STORAGE_ROOT || path.join(process.cwd(), ".mymake-data"),
-    "STORAGE_ROOT",
   );
   const configuredDatabasePath = process.env.SQLITE_DB_PATH
     ? normalizeConfiguredPath(process.env.SQLITE_DB_PATH, "SQLITE_DB_PATH")

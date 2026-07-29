@@ -6,16 +6,17 @@ export const runtime = "nodejs";
 
 export async function GET(
   request: Request,
-  { params }: { params: { projectId: string } },
+  { params }: { params: Promise<{ projectId: string }> },
 ) {
+  const { projectId } = await params;
   try {
     const url = new URL(request.url);
     const filePath = url.searchParams.get("filePath");
-    const workspace = await getWorkspaceSnapshot(params.projectId, {
+    const workspace = await getWorkspaceSnapshot(projectId, {
       currentFilePath: filePath,
       ensurePreview: false,
     });
-    const snapshot = await getDashboardSnapshot(params.projectId);
+    const snapshot = await getDashboardSnapshot(projectId);
     return NextResponse.json({
       ...snapshot,
       currentProject: workspace,

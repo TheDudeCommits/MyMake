@@ -10,11 +10,12 @@ export const runtime = "nodejs";
 
 export async function GET(
   _request: Request,
-  { params }: { params: { projectId: string } },
+  { params }: { params: Promise<{ projectId: string }> },
 ) {
+  const { projectId } = await params;
   let archiveHandle: Awaited<ReturnType<typeof fsp.open>> | null = null;
   try {
-    const archivePath = await createProjectExport(params.projectId);
+    const archivePath = await createProjectExport(projectId);
     archiveHandle = await fsp.open(
       archivePath,
       fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
@@ -32,7 +33,7 @@ export async function GET(
     return new NextResponse(Readable.toWeb(nodeStream) as ReadableStream, {
       headers: {
         "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="${params.projectId}.zip"`,
+        "Content-Disposition": `attachment; filename="${projectId}.zip"`,
         "Content-Length": String(stats.size),
       },
     });

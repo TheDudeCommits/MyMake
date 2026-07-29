@@ -93,12 +93,13 @@ const bodySchema = z.object({
 
 export async function POST(
   request: Request,
-  { params }: { params: { projectId: string } },
+  { params }: { params: Promise<{ projectId: string }> },
 ) {
+  const { projectId } = await params;
   try {
     const body = bodySchema.parse(await request.json());
     const target = await resolveProjectSelection({
-      projectId: params.projectId,
+      projectId,
       selection: body.selection,
       currentFilePath: body.currentFilePath,
     });

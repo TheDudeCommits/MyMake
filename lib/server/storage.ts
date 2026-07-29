@@ -1,10 +1,10 @@
 import AdmZip from "adm-zip";
-import archiver from "archiver";
+import { ZipArchive } from "archiver";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { getEnv } from "@/lib/server/env";
+import { getEnv, resolveConfiguredStorageRoot } from "@/lib/server/env";
 import {
   assertSafePathSegment,
   resolveInsideRoot,
@@ -26,7 +26,8 @@ function shouldCopySource(sourcePath: string): boolean {
 
 export function getProjectPaths(projectId: string): ProjectPaths {
   const safeProjectId = assertSafePathSegment(projectId, "Project ID");
-  const projectsRoot = resolveInsideRoot(getEnv().storageRoot, "projects");
+  const storageRoot = resolveConfiguredStorageRoot(getEnv().storageRoot);
+  const projectsRoot = resolveInsideRoot(storageRoot, "projects");
   const root = resolveInsideRoot(projectsRoot, safeProjectId);
   return {
     root,
@@ -38,8 +39,9 @@ export function getProjectPaths(projectId: string): ProjectPaths {
 }
 
 export async function ensureStorageReady(): Promise<void> {
-  await fsp.mkdir(getEnv().storageRoot, { recursive: true });
-  await fsp.mkdir(resolveInsideRoot(getEnv().storageRoot, "projects"), { recursive: true });
+  const storageRoot = resolveConfiguredStorageRoot(getEnv().storageRoot);
+  await fsp.mkdir(storageRoot, { recursive: true });
+  await fsp.mkdir(resolveInsideRoot(storageRoot, "projects"), { recursive: true });
 }
 
 export async function ensureProjectDirectories(projectId: string): Promise<ProjectPaths> {
@@ -138,7 +140,7 @@ export async function archiveDirectoryToFile(
 
   await new Promise<void>((resolve, reject) => {
     const output = fs.createWriteStream(outputFilePath);
-    const archive = archiver("zip", { zlib: { level: 9 } });
+    const archive = new ZipArchive({ zlib: { level: 9 } });
 
     output.on("close", () => resolve());
     output.on("error", reject);

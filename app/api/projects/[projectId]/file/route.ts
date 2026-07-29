@@ -16,8 +16,9 @@ const updateSchema = z.object({
 
 export async function GET(
   request: Request,
-  { params }: { params: { projectId: string } },
+  { params }: { params: Promise<{ projectId: string }> },
 ) {
+  const { projectId } = await params;
   try {
     const url = new URL(request.url);
     const filePath = url.searchParams.get("path");
@@ -25,7 +26,7 @@ export async function GET(
       return NextResponse.json({ error: "Missing file path." }, { status: 400 });
     }
 
-    return NextResponse.json(await readProjectFile(params.projectId, filePath));
+    return NextResponse.json(await readProjectFile(projectId, filePath));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Could not read the file." },
@@ -36,12 +37,13 @@ export async function GET(
 
 export async function PUT(
   request: Request,
-  { params }: { params: { projectId: string } },
+  { params }: { params: Promise<{ projectId: string }> },
  ) {
+  const { projectId } = await params;
   try {
     const body = updateSchema.parse(await request.json());
-    const workspace = await saveProjectFile(params.projectId, body.path, body.content);
-    const snapshot = await getDashboardSnapshot(params.projectId);
+    const workspace = await saveProjectFile(projectId, body.path, body.content);
+    const snapshot = await getDashboardSnapshot(projectId);
     return NextResponse.json({
       ...snapshot,
       currentProject: workspace,

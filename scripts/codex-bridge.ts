@@ -1,4 +1,4 @@
-import archiver from "archiver";
+import { ZipArchive } from "archiver";
 import AdmZip from "adm-zip";
 import express from "express";
 import { constants as fsConstants, existsSync } from "node:fs";
@@ -858,7 +858,7 @@ function buildCodexPrompt(request: BridgeEditRequest): string {
 
 async function streamWorkspaceZip(sourceDir: string, res: express.Response): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const archive = archiver("zip", { zlib: { level: 9 } });
+    const archive = new ZipArchive({ zlib: { level: 9 } });
     archive.on("error", reject);
     res.on("close", () => resolve());
 

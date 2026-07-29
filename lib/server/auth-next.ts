@@ -8,12 +8,13 @@ import {
 } from "@/lib/server/auth";
 import { type AppUserRecord } from "@/lib/types";
 
-export function getCurrentAppSession(): AppSessionRecord | null {
-  return readSessionCookieValue(cookies().get(SESSION_COOKIE_NAME)?.value);
+export async function getCurrentAppSession(): Promise<AppSessionRecord | null> {
+  const cookieStore = await cookies();
+  return readSessionCookieValue(cookieStore.get(SESSION_COOKIE_NAME)?.value);
 }
 
-export function requireCurrentAppSession(): AppSessionRecord {
-  const session = getCurrentAppSession();
+export async function requireCurrentAppSession(): Promise<AppSessionRecord> {
+  const session = await getCurrentAppSession();
   if (!session) {
     throw new Error("Unauthorized");
   }
@@ -22,7 +23,7 @@ export function requireCurrentAppSession(): AppSessionRecord {
 }
 
 export async function getCurrentAppUser(): Promise<AppUserRecord | null> {
-  const session = getCurrentAppSession();
+  const session = await getCurrentAppSession();
   if (!session) {
     return null;
   }
@@ -31,7 +32,7 @@ export async function getCurrentAppUser(): Promise<AppUserRecord | null> {
 }
 
 export async function requireCurrentAppUser(): Promise<AppUserRecord> {
-  const session = requireCurrentAppSession();
+  const session = await requireCurrentAppSession();
   const user = getAppUserById(session.userId);
   if (!user) {
     throw new Error("Unauthorized");

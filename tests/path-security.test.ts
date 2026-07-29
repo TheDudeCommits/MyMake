@@ -6,6 +6,7 @@ import test from "node:test";
 
 import AdmZip from "adm-zip";
 
+import { resolveConfiguredStorageRoot } from "@/lib/server/env";
 import { GuidelineStore } from "@/lib/server/guidelines";
 import {
   assertSafePathSegment,
@@ -68,6 +69,27 @@ test("safe path segments accept generated IDs and reject path syntax", () => {
     assert.throws(() => assertSafePathSegment(value), /invalid/);
   }
   assert.throws(() => getProjectPaths("../outside"), /invalid/);
+});
+
+test("configured storage is restricted to managed application and volume roots", () => {
+  const applicationRoot = path.resolve(process.cwd());
+  const localStorage = path.join(applicationRoot, ".mymake-data");
+  const volumeStorage = path.resolve(path.parse(applicationRoot).root, "data", "mymake");
+
+  assert.equal(resolveConfiguredStorageRoot(localStorage), localStorage);
+  assert.equal(resolveConfiguredStorageRoot(volumeStorage), volumeStorage);
+  assert.throws(
+    () => resolveConfiguredStorageRoot(path.resolve(applicationRoot, "..", "outside")),
+    /application directory or \/data/,
+  );
+  assert.throws(
+    () =>
+      resolveConfiguredStorageRoot(
+        path.resolve(path.parse(applicationRoot).root, "data-other", "mymake"),
+      ),
+    /application directory or \/data/,
+  );
+  assert.throws(() => resolveConfiguredStorageRoot("bad\u0000path"), /control/);
 });
 
 test("zip extraction rejects traversal entries without writing outside the destination", async () => {
