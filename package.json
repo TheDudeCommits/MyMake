@@ -32,7 +32,7 @@
     "lucide-react": "^1.8.0",
     "mime-types": "^3.0.2",
     "nanoid": "^5.1.7",
-    "next": "14.2.35",
+    "next": "15.5.21",
     "openai": "^6.34.0",
     "pdf-parse": "^2.4.5",
     "react": "^18",
