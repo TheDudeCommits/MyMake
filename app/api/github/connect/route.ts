@@ -31,22 +31,23 @@ export async function GET(request: Request) {
     state,
     redirectUri,
   });
+  const cookieStore = await cookies();
 
-  cookies().set(GITHUB_STATE_COOKIE_NAME, state, {
+  cookieStore.set(GITHUB_STATE_COOKIE_NAME, state, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: 60 * 10,
   });
-  cookies().set(GITHUB_REDIRECT_COOKIE_NAME, redirectPath, {
+  cookieStore.set(GITHUB_REDIRECT_COOKIE_NAME, redirectPath, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: 60 * 10,
   });
-  cookies().set(GITHUB_USER_COOKIE_NAME, user.id, {
+  cookieStore.set(GITHUB_USER_COOKIE_NAME, user.id, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",

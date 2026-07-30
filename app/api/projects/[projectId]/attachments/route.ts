@@ -7,8 +7,9 @@ export const runtime = "nodejs";
 
 export async function POST(
   request: Request,
-  { params }: { params: { projectId: string } },
+  { params }: { params: Promise<{ projectId: string }> },
 ) {
+  const { projectId } = await params;
   try {
     const formData = await request.formData();
     const files = formData
@@ -25,7 +26,7 @@ export async function POST(
     }
 
     const attachments = await saveAttachments(
-      params.projectId,
+      projectId,
       await Promise.all(
         files.map(async (file) => ({
           filename: file.name,

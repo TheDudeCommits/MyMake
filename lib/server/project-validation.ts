@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
 
+import { resolveInsideRoot } from "@/lib/server/path-utils";
 import { ensureStaticEditableOverridesSupport } from "@/lib/server/static-overrides";
 import type { PackageManager, ProjectRuntime } from "@/lib/types";
 
@@ -66,20 +67,25 @@ async function listFiles(rootDir: string, currentDir = rootDir): Promise<string[
   const files: string[] = [];
 
   for (const entry of entries) {
-    const absolutePath = path.join(currentDir, entry.name);
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
+
+    const relativePath = path.relative(rootDir, path.join(currentDir, entry.name));
+    const absolutePath = resolveInsideRoot(rootDir, relativePath);
     if (entry.isDirectory()) {
       files.push(...(await listFiles(rootDir, absolutePath)));
       continue;
     }
 
-    files.push(path.relative(rootDir, absolutePath));
+    files.push(relativePath);
   }
 
   return files;
 }
 
 async function readManifest(projectDir: string): Promise<ProjectManifest | null> {
-  const packageJsonPath = path.join(projectDir, "package.json");
+  const packageJsonPath = resolveInsideRoot(projectDir, "package.json");
   if (!(await pathExists(packageJsonPath))) {
     return null;
   }
@@ -352,15 +358,15 @@ export async function detectProjectRuntime(projectDir: string): Promise<ProjectR
     if (
       dependencies.vite ||
       scriptText.includes("vite") ||
-      (await pathExists(path.join(projectDir, "vite.config.ts"))) ||
-      (await pathExists(path.join(projectDir, "vite.config.js"))) ||
-      (await pathExists(path.join(projectDir, "vite.config.mjs")))
+      (await pathExists(resolveInsideRoot(projectDir, "vite.config.ts"))) ||
+      (await pathExists(resolveInsideRoot(projectDir, "vite.config.js"))) ||
+      (await pathExists(resolveInsideRoot(projectDir, "vite.config.mjs")))
     ) {
       return "vite";
     }
   }
 
-  if (await pathExists(path.join(projectDir, "index.html"))) {
+  if (await pathExists(resolveInsideRoot(projectDir, "index.html"))) {
     return "static";
   }
 
@@ -372,7 +378,7 @@ export function runtimeRequiresDependencyInstall(runtime: ProjectRuntime | null)
 }
 
 export async function normalizeImportedProject(projectDir: string): Promise<void> {
-  const packageJsonPath = path.join(projectDir, "package.json");
+  const packageJsonPath = resolveInsideRoot(projectDir, "package.json");
   const manifest = await readManifest(projectDir);
   const runtime = await detectProjectRuntime(projectDir);
 
@@ -407,7 +413,7 @@ export async function normalizeImportedProject(projectDir: string): Promise<void
     await fs.writeFile(packageJsonPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   }
 
-  const assetRoot = path.join(projectDir, "src", "assets");
+  const assetRoot = resolveInsideRoot(projectDir, "src/assets");
   if (!(await pathExists(assetRoot))) {
     return;
   }
@@ -423,7 +429,7 @@ export async function normalizeImportedProject(projectDir: string): Promise<void
       continue;
     }
 
-    const absolutePath = path.join(projectDir, relativePath);
+    const absolutePath = resolveInsideRoot(projectDir, relativePath);
     const originalContent = await fs.readFile(absolutePath, "utf8");
     const nextContent = originalContent.replace(/figma:asset\/([A-Za-z0-9._-]+)/g, (match, assetName) => {
       if (!assetFiles.has(assetName)) {
@@ -431,7 +437,7 @@ export async function normalizeImportedProject(projectDir: string): Promise<void
       }
 
       const sourceDirectory = path.dirname(absolutePath);
-      const assetPath = path.join(assetRoot, assetName);
+      const assetPath = resolveInsideRoot(assetRoot, assetName);
       const relativeAssetPath = path.relative(sourceDirectory, assetPath).split(path.sep).join("/");
       return relativeAssetPath.startsWith(".") ? relativeAssetPath : `./${relativeAssetPath}`;
     });
@@ -448,11 +454,11 @@ export async function normalizeImportedProject(projectDir: string): Promise<void
 }
 
 export async function detectPackageManager(projectDir: string): Promise<PackageManager> {
-  if (await pathExists(path.join(projectDir, "pnpm-lock.yaml"))) {
+  if (await pathExists(resolveInsideRoot(projectDir, "pnpm-lock.yaml"))) {
     return "pnpm";
   }
 
-  if (await pathExists(path.join(projectDir, "yarn.lock"))) {
+  if (await pathExists(resolveInsideRoot(projectDir, "yarn.lock"))) {
     return "yarn";
   }
 
@@ -508,8 +514,8 @@ export async function validateProjectDirectory(projectDir: string): Promise<Vali
   }
 
   if (runtime === "next") {
-    const hasAppRouter = await pathExists(path.join(projectDir, "app"));
-    const hasPagesRouter = await pathExists(path.join(projectDir, "pages"));
+    const hasAppRouter = await pathExists(resolveInsideRoot(projectDir, "app"));
+    const hasPagesRouter = await pathExists(resolveInsideRoot(projectDir, "pages"));
     if (!hasAppRouter && !hasPagesRouter) {
       return {
         ok: false,
@@ -518,7 +524,7 @@ export async function validateProjectDirectory(projectDir: string): Promise<Vali
       };
     }
 
-    if (await pathExists(path.join(projectDir, "app", "api"))) {
+    if (await pathExists(resolveInsideRoot(projectDir, "app/api"))) {
       return {
         ok: false,
         packageManager,
@@ -526,7 +532,7 @@ export async function validateProjectDirectory(projectDir: string): Promise<Vali
       };
     }
 
-    if (await pathExists(path.join(projectDir, "pages", "api"))) {
+    if (await pathExists(resolveInsideRoot(projectDir, "pages/api"))) {
       return {
         ok: false,
         packageManager,
@@ -536,12 +542,12 @@ export async function validateProjectDirectory(projectDir: string): Promise<Vali
   }
 
   if (runtime === "vite") {
-    const hasIndexHtml = await pathExists(path.join(projectDir, "index.html"));
+    const hasIndexHtml = await pathExists(resolveInsideRoot(projectDir, "index.html"));
     const hasEntryPoint =
-      (await pathExists(path.join(projectDir, "src", "main.tsx"))) ||
-      (await pathExists(path.join(projectDir, "src", "main.jsx"))) ||
-      (await pathExists(path.join(projectDir, "src", "main.ts"))) ||
-      (await pathExists(path.join(projectDir, "src", "main.js")));
+      (await pathExists(resolveInsideRoot(projectDir, "src/main.tsx"))) ||
+      (await pathExists(resolveInsideRoot(projectDir, "src/main.jsx"))) ||
+      (await pathExists(resolveInsideRoot(projectDir, "src/main.ts"))) ||
+      (await pathExists(resolveInsideRoot(projectDir, "src/main.js")));
 
     if (!hasIndexHtml || !hasEntryPoint) {
       return {
@@ -553,7 +559,7 @@ export async function validateProjectDirectory(projectDir: string): Promise<Vali
   }
 
   if (runtime === "static") {
-    const hasIndexHtml = await pathExists(path.join(projectDir, "index.html"));
+    const hasIndexHtml = await pathExists(resolveInsideRoot(projectDir, "index.html"));
     if (!hasIndexHtml) {
       return {
         ok: false,

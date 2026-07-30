@@ -1,11 +1,15 @@
 import AdmZip from "adm-zip";
-import archiver from "archiver";
+import { ZipArchive } from "archiver";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { getEnv } from "@/lib/server/env";
-import { shouldIgnoreEntry } from "@/lib/server/path-utils";
+import { getEnv, resolveConfiguredStorageRoot } from "@/lib/server/env";
+import {
+  assertSafePathSegment,
+  resolveInsideRoot,
+  shouldIgnoreEntry,
+} from "@/lib/server/path-utils";
 
 export interface ProjectPaths {
   root: string;
@@ -21,19 +25,23 @@ function shouldCopySource(sourcePath: string): boolean {
 }
 
 export function getProjectPaths(projectId: string): ProjectPaths {
-  const root = path.join(getEnv().storageRoot, "projects", projectId);
+  const safeProjectId = assertSafePathSegment(projectId, "Project ID");
+  const storageRoot = resolveConfiguredStorageRoot(getEnv().storageRoot);
+  const projectsRoot = resolveInsideRoot(storageRoot, "projects");
+  const root = resolveInsideRoot(projectsRoot, safeProjectId);
   return {
     root,
-    current: path.join(root, "current"),
-    revisions: path.join(root, "revisions"),
-    attachments: path.join(root, "attachments"),
-    sourceZip: path.join(root, "source.zip"),
+    current: resolveInsideRoot(root, "current"),
+    revisions: resolveInsideRoot(root, "revisions"),
+    attachments: resolveInsideRoot(root, "attachments"),
+    sourceZip: resolveInsideRoot(root, "source.zip"),
   };
 }
 
 export async function ensureStorageReady(): Promise<void> {
-  await fsp.mkdir(getEnv().storageRoot, { recursive: true });
-  await fsp.mkdir(path.join(getEnv().storageRoot, "projects"), { recursive: true });
+  const storageRoot = resolveConfiguredStorageRoot(getEnv().storageRoot);
+  await fsp.mkdir(storageRoot, { recursive: true });
+  await fsp.mkdir(resolveInsideRoot(storageRoot, "projects"), { recursive: true });
 }
 
 export async function ensureProjectDirectories(projectId: string): Promise<ProjectPaths> {
@@ -57,7 +65,7 @@ export async function clearDirectoryExcept(
         return;
       }
 
-      await fsp.rm(path.join(directoryPath, entry), {
+      await fsp.rm(resolveInsideRoot(directoryPath, entry), {
         recursive: true,
         force: true,
       });
@@ -92,22 +100,12 @@ export async function createRevisionSnapshot(
   revisionId: string,
 ): Promise<string> {
   const paths = await ensureProjectDirectories(projectId);
-  const snapshotPath = path.join(paths.revisions, revisionId);
+  const snapshotPath = resolveInsideRoot(
+    paths.revisions,
+    assertSafePathSegment(revisionId, "Revision ID"),
+  );
   await copyProjectDirectory(paths.current, snapshotPath);
   return snapshotPath;
-}
-
-function normalizeZipEntry(entryPath: string): string | null {
-  const normalized = path
-    .normalize(entryPath)
-    .replace(/^(\.\.(\/|\\|$))+/, "")
-    .replace(/^[/\\]+/, "");
-
-  if (!normalized || normalized.startsWith("..")) {
-    return null;
-  }
-
-  return normalized;
 }
 
 export async function extractZipBufferToDirectory(
@@ -119,12 +117,11 @@ export async function extractZipBufferToDirectory(
 
   const archive = new AdmZip(buffer);
   for (const entry of archive.getEntries()) {
-    const relativePath = normalizeZipEntry(entry.entryName);
-    if (!relativePath) {
+    if (!entry.entryName || entry.entryName.includes("\u0000")) {
       continue;
     }
 
-    const outputPath = path.join(destination, relativePath);
+    const outputPath = resolveInsideRoot(destination, entry.entryName);
     if (entry.isDirectory) {
       await fsp.mkdir(outputPath, { recursive: true });
       continue;
@@ -143,7 +140,7 @@ export async function archiveDirectoryToFile(
 
   await new Promise<void>((resolve, reject) => {
     const output = fs.createWriteStream(outputFilePath);
-    const archive = archiver("zip", { zlib: { level: 9 } });
+    const archive = new ZipArchive({ zlib: { level: 9 } });
 
     output.on("close", () => resolve());
     output.on("error", reject);

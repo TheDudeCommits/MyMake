@@ -3,14 +3,15 @@ import { redirect } from "next/navigation";
 import { AuthForm } from "@/components/auth-form";
 import { getCurrentAppSession } from "@/lib/server/auth-next";
 
-export default function AuthPage({
+export default async function AuthPage({
   searchParams,
 }: {
-  searchParams?: Record<string, string | string[] | undefined>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const redirectParam = searchParams?.redirect;
+  const resolvedSearchParams = searchParams ? await searchParams : undefined;
+  const redirectParam = resolvedSearchParams?.redirect;
   const redirectPath = Array.isArray(redirectParam) ? redirectParam[0] : redirectParam;
-  const session = getCurrentAppSession();
+  const session = await getCurrentAppSession();
 
   if (session) {
     redirect(redirectPath || "/");

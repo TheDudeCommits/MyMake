@@ -29,7 +29,8 @@ export async function POST(request: Request) {
   try {
     const body = bodySchema.parse(await request.json());
     const user = await upsertAppUserFromPrivyTokens(body);
-    cookies().set(SESSION_COOKIE_NAME, createSessionCookieValue(user), getSessionCookieOptions());
+    const cookieStore = await cookies();
+    cookieStore.set(SESSION_COOKIE_NAME, createSessionCookieValue(user), getSessionCookieOptions());
 
     return NextResponse.json({
       ok: true,

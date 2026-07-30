@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -40,6 +41,7 @@ import {
   type KnowledgeArtifacts,
 } from "@/lib/server/project-intelligence";
 import {
+  assertSafePathSegment,
   buildFileTree,
   isTextLikeFile,
   listProjectFiles,
@@ -150,12 +152,38 @@ function requireRuntime(runtime: ProjectRuntime | null | undefined): ProjectRunt
   return runtime;
 }
 
+function assertStoredPathInside(root: string, storedPath: string, label: string): string {
+  const resolvedStoredPath = path.resolve(storedPath);
+  try {
+    return resolveInsideRoot(root, path.relative(root, resolvedStoredPath));
+  } catch {
+    throw new Error(`${label} is outside its managed storage directory.`);
+  }
+}
+
+function assertStoredPathEquals(expectedPath: string, storedPath: string, label: string): string {
+  if (path.resolve(storedPath) !== path.resolve(expectedPath)) {
+    throw new Error(`${label} does not match its managed storage location.`);
+  }
+  return expectedPath;
+}
+
 function mapProjectRow(row: Record<string, unknown>): ProjectRecord {
+  const id = assertSafePathSegment(String(row.id), "Project ID");
+  const paths = getProjectPaths(id);
   return {
-    id: String(row.id),
+    id,
     name: String(row.name),
-    sourceZipPath: String(row.source_zip_path),
-    extractedPath: String(row.extracted_path),
+    sourceZipPath: assertStoredPathEquals(
+      paths.sourceZip,
+      String(row.source_zip_path),
+      "Project source archive path",
+    ),
+    extractedPath: assertStoredPathEquals(
+      paths.current,
+      String(row.extracted_path),
+      "Project directory path",
+    ),
     packageManager: row.package_manager as PackageManager,
     status: row.status as ProjectRecord["status"],
     currentRevisionId: row.current_revision_id ? String(row.current_revision_id) : null,
@@ -167,13 +195,19 @@ function mapProjectRow(row: Record<string, unknown>): ProjectRecord {
 }
 
 function mapRevisionRow(row: Record<string, unknown>): RevisionRecord {
+  const id = assertSafePathSegment(String(row.id), "Revision ID");
+  const projectId = assertSafePathSegment(String(row.project_id), "Project ID");
   return {
-    id: String(row.id),
-    projectId: String(row.project_id),
+    id,
+    projectId,
     parentRevisionId: row.parent_revision_id ? String(row.parent_revision_id) : null,
     label: String(row.label),
     source: row.source as RevisionRecord["source"],
-    snapshotPath: String(row.snapshot_path),
+    snapshotPath: assertStoredPathEquals(
+      resolveInsideRoot(getProjectPaths(projectId).revisions, id),
+      String(row.snapshot_path),
+      "Revision snapshot path",
+    ),
     sequence: Number(row.sequence),
     summary: row.summary ? String(row.summary) : null,
     createdAt: String(row.created_at),
@@ -181,12 +215,18 @@ function mapRevisionRow(row: Record<string, unknown>): RevisionRecord {
 }
 
 function mapAttachmentRow(row: Record<string, unknown>): AttachmentRecord {
+  const id = assertSafePathSegment(String(row.id), "Attachment ID");
+  const projectId = assertSafePathSegment(String(row.project_id), "Project ID");
   return {
-    id: String(row.id),
-    projectId: String(row.project_id),
+    id,
+    projectId,
     filename: String(row.filename),
     mimeType: String(row.mime_type),
-    storagePath: String(row.storage_path),
+    storagePath: assertStoredPathInside(
+      getProjectPaths(projectId).attachments,
+      String(row.storage_path),
+      "Attachment path",
+    ),
     sizeBytes: Number(row.size_bytes),
     createdAt: String(row.created_at),
   };
@@ -428,13 +468,46 @@ function getLatestValidationResult(projectId: string): ValidationResultRecord | 
   return row ? mapValidationResultRow(row) : null;
 }
 
-async function pathExists(targetPath: string): Promise<boolean> {
+async function readRegularFile(targetPath: string): Promise<Buffer | null> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
-    await fs.access(targetPath);
-    return true;
-  } catch {
-    return false;
+    handle = await fs.open(targetPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      return null;
+    }
+    return await handle.readFile();
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error.code === "ENOENT" || error.code === "ELOOP")
+    ) {
+      return null;
+    }
+    throw error;
+  } finally {
+    await handle?.close();
   }
+}
+
+async function readProjectTextFile(
+  projectDir: string,
+  relativePath: string,
+): Promise<string | null> {
+  let absolutePath: string;
+  try {
+    absolutePath = resolveInsideRoot(projectDir, relativePath);
+  } catch {
+    return null;
+  }
+  if (!isTextLikeFile(absolutePath)) {
+    return null;
+  }
+
+  const content = await readRegularFile(absolutePath);
+  return content?.toString("utf8") ?? null;
 }
 
 async function readManifestHash(projectDir: string): Promise<string> {
@@ -442,13 +515,14 @@ async function readManifestHash(projectDir: string): Promise<string> {
   const manifestFiles = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"];
 
   for (const fileName of manifestFiles) {
-    const filePath = path.join(projectDir, fileName);
-    if (!(await pathExists(filePath))) {
+    const filePath = resolveInsideRoot(projectDir, fileName);
+    const content = await readRegularFile(filePath);
+    if (!content) {
       continue;
     }
 
     hash.update(fileName);
-    hash.update(await fs.readFile(filePath));
+    hash.update(content);
   }
 
   return hash.digest("hex");
@@ -491,7 +565,7 @@ async function runCommand(
 }
 
 function getRepoSyncPath(projectId: string): string {
-  return path.join(getProjectPaths(projectId).root, "repo-sync");
+  return resolveInsideRoot(getProjectPaths(projectId).root, "repo-sync");
 }
 
 function githubAuthHeaderValue(token: string): string {
@@ -507,7 +581,7 @@ async function removeDirectoryContents(directoryPath: string): Promise<void> {
   const entries = await fs.readdir(directoryPath);
   await Promise.all(
     entries.map((entry) =>
-      fs.rm(path.join(directoryPath, entry), {
+      fs.rm(resolveInsideRoot(directoryPath, entry), {
         recursive: true,
         force: true,
       }),
@@ -705,8 +779,8 @@ async function installDependenciesWithRecovery(
       throw error;
     }
 
-    await fs.rm(path.join(projectDir, "node_modules"), { recursive: true, force: true });
-    await fs.rm(path.join(projectDir, ".next"), { recursive: true, force: true });
+    await fs.rm(resolveInsideRoot(projectDir, "node_modules"), { recursive: true, force: true });
+    await fs.rm(resolveInsideRoot(projectDir, ".next"), { recursive: true, force: true });
     await reclaimProjectInstallStorage(projectId);
     await installDependencies(projectDir, packageManager);
   }
@@ -1315,7 +1389,13 @@ async function pruneRedoBranch(projectId: string, ownerUserId?: string): Promise
     .all(projectId, currentRevision.sequence) as { id: string; snapshot_path: string }[];
 
   for (const revision of futureRevisions) {
-    await fs.rm(revision.snapshot_path, { recursive: true, force: true });
+    const revisionId = assertSafePathSegment(revision.id, "Revision ID");
+    const snapshotPath = assertStoredPathEquals(
+      resolveInsideRoot(getProjectPaths(projectId).revisions, revisionId),
+      revision.snapshot_path,
+      "Revision snapshot path",
+    );
+    await fs.rm(snapshotPath, { recursive: true, force: true });
     getDb().prepare("DELETE FROM revisions WHERE id = ?").run(revision.id);
   }
 }
@@ -1802,12 +1882,11 @@ export async function getWorkspaceSnapshot(
   const currentFilePath =
     options.currentFilePath ||
     defaultFileCandidates(files).find(Boolean) ||
-    files.find((file) => isTextLikeFile(path.join(project.extractedPath, file))) ||
+    files.find((file) => isTextLikeFile(resolveInsideRoot(project.extractedPath, file))) ||
     null;
-  const currentFileContent =
-    currentFilePath && isTextLikeFile(path.join(project.extractedPath, currentFilePath))
-      ? await fs.readFile(path.join(project.extractedPath, currentFilePath), "utf8")
-      : null;
+  const currentFileContent = currentFilePath
+    ? await readProjectTextFile(project.extractedPath, currentFilePath)
+    : null;
 
   return {
     project: getProjectRow(projectId, userId),
@@ -2132,7 +2211,8 @@ export async function pushProjectToGitHub(projectId: string): Promise<{
     throw new Error("Link this project to GitHub first.");
   }
 
-  const tempWorkTree = await fs.mkdtemp(path.join(os.tmpdir(), `mymake-git-${projectId}-`));
+  const safeProjectId = assertSafePathSegment(projectId, "Project ID");
+  const tempWorkTree = await fs.mkdtemp(path.join(os.tmpdir(), `mymake-git-${safeProjectId}-`));
 
   try {
     if (binding.source === "created") {
@@ -2225,7 +2305,7 @@ export async function createProjectFromUpload(
   const projectPaths = await ensureProjectDirectories(projectId);
   await fs.writeFile(projectPaths.sourceZip, zipBuffer);
 
-  const unpackDir = path.join(projectPaths.root, "unpacked");
+  const unpackDir = resolveInsideRoot(projectPaths.root, "unpacked");
   await extractZipBufferToDirectory(zipBuffer, unpackDir);
 
   const validation = await validateProjectDirectory(unpackDir);
@@ -2410,7 +2490,7 @@ export async function saveAttachments(
 
   for (const file of files) {
     const attachmentId = nanoid(10);
-    const storagePath = path.join(paths.attachments, `${attachmentId}-${file.filename}`);
+    const storagePath = resolveInsideRoot(paths.attachments, attachmentId);
     await fs.writeFile(storagePath, file.data);
 
     const record: AttachmentRecord = {
@@ -3955,11 +4035,9 @@ export async function applyAiEdit(
     payload.currentFilePath,
   );
   const route = payload.selection?.route || "/";
-  const activeFileContent =
-    effectiveCurrentFilePath &&
-    isTextLikeFile(path.join(project.extractedPath, effectiveCurrentFilePath))
-      ? await fs.readFile(path.join(project.extractedPath, effectiveCurrentFilePath), "utf8")
-      : null;
+  const activeFileContent = effectiveCurrentFilePath
+    ? await readProjectTextFile(project.extractedPath, effectiveCurrentFilePath)
+    : null;
 
   const knowledge = await readKnowledgeFiles(project.extractedPath);
   const selectionTarget = await buildSelectionTarget({
@@ -4447,23 +4525,14 @@ async function collectExistingChangedFiles(
 
   for (const changedFile of changedFiles) {
     const normalizedPath = toPosixPath(changedFile.path);
-    const absolutePath = path.join(projectDir, normalizedPath);
-    if (!isTextLikeFile(absolutePath)) {
-      continue;
-    }
-
-    try {
-      const stats = await fs.stat(absolutePath);
-      if (!stats.isFile()) {
-        continue;
-      }
-    } catch {
+    const content = await readProjectTextFile(projectDir, normalizedPath);
+    if (content === null) {
       continue;
     }
 
     collected.push({
       path: normalizedPath,
-      content: await fs.readFile(absolutePath, "utf8"),
+      content,
       reason: changedFile.reason,
     });
   }
@@ -4541,7 +4610,10 @@ export async function applyCodexBridgeWorkspace(params: {
     selectionTarget,
   });
 
-  const unpackDir = path.join(getProjectPaths(params.projectId).root, `codex-import-${Date.now()}`);
+  const unpackDir = resolveInsideRoot(
+    getProjectPaths(params.projectId).root,
+    `codex-import-${Date.now()}`,
+  );
 
   try {
     await extractZipBufferToDirectory(params.zipBuffer, unpackDir);
@@ -4954,7 +5026,10 @@ export async function redoProject(projectId: string): Promise<ProjectWorkspace> 
 
 export async function createProjectExport(projectId: string): Promise<string> {
   const project = getProjectRow(projectId, await requireCurrentUserId());
-  const outputPath = path.join(getProjectPaths(projectId).root, `export-${Date.now()}.zip`);
+  const outputPath = resolveInsideRoot(
+    getProjectPaths(projectId).root,
+    `export-${Date.now()}-${nanoid(6)}.zip`,
+  );
   await archiveDirectoryToFile(project.extractedPath, outputPath);
   return outputPath;
 }

@@ -21,17 +21,18 @@ const bodySchema = z.union([
 
 export async function POST(
   request: Request,
-  { params }: { params: { projectId: string } },
+  { params }: { params: Promise<{ projectId: string }> },
 ) {
+  const { projectId } = await params;
   try {
     const body = bodySchema.parse(await request.json());
     const workspace =
       "action" in body
         ? body.action === "undo"
-          ? await undoProject(params.projectId)
-          : await redoProject(params.projectId)
-        : await restoreProjectRevision(params.projectId, body.revisionId);
-    const snapshot = await getDashboardSnapshot(params.projectId);
+          ? await undoProject(projectId)
+          : await redoProject(projectId)
+        : await restoreProjectRevision(projectId, body.revisionId);
+    const snapshot = await getDashboardSnapshot(projectId);
 
     return NextResponse.json({
       ...snapshot,

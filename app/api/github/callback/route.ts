@@ -18,13 +18,14 @@ export async function GET(request: Request) {
   const publicAppBaseUrl = getPublicAppBaseUrl(requestUrl.origin);
   const code = requestUrl.searchParams.get("code");
   const state = requestUrl.searchParams.get("state");
-  const expectedState = cookies().get(GITHUB_STATE_COOKIE_NAME)?.value;
-  const redirectPath = cookies().get(GITHUB_REDIRECT_COOKIE_NAME)?.value || "/";
-  const userId = cookies().get(GITHUB_USER_COOKIE_NAME)?.value;
+  const cookieStore = await cookies();
+  const expectedState = cookieStore.get(GITHUB_STATE_COOKIE_NAME)?.value;
+  const redirectPath = cookieStore.get(GITHUB_REDIRECT_COOKIE_NAME)?.value || "/";
+  const userId = cookieStore.get(GITHUB_USER_COOKIE_NAME)?.value;
 
-  cookies().delete(GITHUB_STATE_COOKIE_NAME);
-  cookies().delete(GITHUB_REDIRECT_COOKIE_NAME);
-  cookies().delete(GITHUB_USER_COOKIE_NAME);
+  cookieStore.delete(GITHUB_STATE_COOKIE_NAME);
+  cookieStore.delete(GITHUB_REDIRECT_COOKIE_NAME);
+  cookieStore.delete(GITHUB_USER_COOKIE_NAME);
 
   if (!code || !state || !expectedState || state !== expectedState || !userId) {
     const failedUrl = new URL(redirectPath, publicAppBaseUrl);

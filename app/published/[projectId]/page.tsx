@@ -7,10 +7,11 @@ export const dynamic = "force-dynamic";
 export default async function PublishedProjectPage({
   params,
 }: {
-  params: { projectId: string };
+  params: Promise<{ projectId: string }>;
 }) {
+  const { projectId } = await params;
   try {
-    const workspace = await getWorkspaceSnapshot(params.projectId, {
+    const workspace = await getWorkspaceSnapshot(projectId, {
       ensurePreview: false,
       allowPublic: true,
     });
@@ -19,7 +20,7 @@ export default async function PublishedProjectPage({
       <main className="h-screen w-screen overflow-hidden bg-[#111216]">
         <iframe
           title={`${workspace.project.name} published preview`}
-          src={`/public-preview/${params.projectId}/`}
+          src={`/public-preview/${projectId}/`}
           className="h-full w-full border-0 bg-[#111216]"
         />
       </main>

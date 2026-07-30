@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
-import path from "node:path";
-import vm from "node:vm";
+
+import { resolveInsideRoot } from "@/lib/server/path-utils";
 
 export const OVERRIDES_CONFIG_PATH = "editable/overrides.config.js";
 export const OVERRIDES_ENGINE_PATH = "editable/overrides.engine.js";
@@ -435,7 +435,7 @@ function findMatchingDelimiter(
 }
 
 function getAssignedObjectRange(content: string): { start: number; end: number } | null {
-  const assignmentMatch = content.match(/window\.__PLATFORM_OVERRIDES__\s*=\s*/);
+  const assignmentMatch = content.match(/^\s*window\.__PLATFORM_OVERRIDES__\s*=\s*/);
   if (!assignmentMatch || assignmentMatch.index === undefined) {
     return null;
   }
@@ -453,203 +453,47 @@ function getAssignedObjectRange(content: string): { start: number; end: number }
   return { start: objectStart, end: objectEnd };
 }
 
-function findExpressionEnd(content: string, startIndex: number, limit: number): number {
-  let braceDepth = 0;
-  let bracketDepth = 0;
-  let parenDepth = 0;
-  let quote: "'" | '"' | "`" | null = null;
-  let escaped = false;
-  let inLineComment = false;
-  let inBlockComment = false;
-
-  for (let index = startIndex; index < limit; index += 1) {
-    const character = content[index];
-    const nextCharacter = content[index + 1] || "";
-
-    if (inLineComment) {
-      if (character === "\n") {
-        inLineComment = false;
-      }
-      continue;
-    }
-
-    if (inBlockComment) {
-      if (character === "*" && nextCharacter === "/") {
-        inBlockComment = false;
-        index += 1;
-      }
-      continue;
-    }
-
-    if (quote) {
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-
-      if (character === "\\") {
-        escaped = true;
-        continue;
-      }
-
-      if (character === quote) {
-        quote = null;
-      }
-      continue;
-    }
-
-    if (character === "/" && nextCharacter === "/") {
-      inLineComment = true;
-      index += 1;
-      continue;
-    }
-
-    if (character === "/" && nextCharacter === "*") {
-      inBlockComment = true;
-      index += 1;
-      continue;
-    }
-
-    if (character === "'" || character === '"' || character === "`") {
-      quote = character;
-      continue;
-    }
-
-    if (character === "{") {
-      braceDepth += 1;
-      continue;
-    }
-
-    if (character === "}") {
-      if (braceDepth === 0 && bracketDepth === 0 && parenDepth === 0) {
-        return index;
-      }
-      braceDepth -= 1;
-      continue;
-    }
-
-    if (character === "[") {
-      bracketDepth += 1;
-      continue;
-    }
-
-    if (character === "]") {
-      bracketDepth -= 1;
-      continue;
-    }
-
-    if (character === "(") {
-      parenDepth += 1;
-      continue;
-    }
-
-    if (character === ")") {
-      parenDepth -= 1;
-      continue;
-    }
-
-    if (
-      character === "," &&
-      braceDepth === 0 &&
-      bracketDepth === 0 &&
-      parenDepth === 0
-    ) {
-      return index;
-    }
-  }
-
-  return limit;
-}
-
-function extractTopLevelPropertyExpressions(content: string, key: string): string[] {
+function parseAssignedOverrideObject(content: string): Record<string, unknown> {
   const range = getAssignedObjectRange(content);
   if (!range) {
-    return [];
+    if (!content.trim()) {
+      return {};
+    }
+    throw new Error(
+      `${OVERRIDES_CONFIG_PATH} must assign one JSON object to window.__PLATFORM_OVERRIDES__.`,
+    );
   }
 
-  const expressions: string[] = [];
-  let index = range.start + 1;
-  while (index < range.end) {
-    while (index < range.end && /[\s,]/.test(content[index] || "")) {
-      index += 1;
-    }
-
-    if (index >= range.end) {
-      break;
-    }
-
-    if (!content.startsWith(key, index)) {
-      index += 1;
-      continue;
-    }
-
-    let cursor = index + key.length;
-    while (cursor < range.end && /\s/.test(content[cursor] || "")) {
-      cursor += 1;
-    }
-
-    if (content[cursor] !== ":") {
-      index += 1;
-      continue;
-    }
-
-    cursor += 1;
-    while (cursor < range.end && /\s/.test(content[cursor] || "")) {
-      cursor += 1;
-    }
-
-    const expressionEnd = findExpressionEnd(content, cursor, range.end);
-    expressions.push(content.slice(cursor, expressionEnd).trim());
-    index = expressionEnd + 1;
+  if (!/^\s*;?\s*$/.test(content.slice(range.end + 1))) {
+    throw new Error(
+      `${OVERRIDES_CONFIG_PATH} may not contain executable statements.`,
+    );
   }
 
-  return expressions;
-}
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content.slice(range.start, range.end + 1));
+  } catch {
+    throw new Error(
+      `${OVERRIDES_CONFIG_PATH} must use JSON-compatible values without executable expressions.`,
+    );
+  }
 
-function evaluateExpression(expression: string): unknown {
-  const script = new vm.Script(`(${expression})`);
-  return script.runInNewContext({});
+  if (!isPlainObject(parsed)) {
+    throw new Error(`${OVERRIDES_CONFIG_PATH} must contain a JSON object.`);
+  }
+  return parsed;
 }
 
 export function readOverrideConfigValue(content: string): OverrideConfigValue {
-  const sandbox = { window: {} as Record<string, unknown> };
-  new vm.Script(content, { filename: OVERRIDES_CONFIG_PATH }).runInNewContext(sandbox);
-
-  const baseValue = isPlainObject(sandbox.window.__PLATFORM_OVERRIDES__)
-    ? sandbox.window.__PLATFORM_OVERRIDES__
-    : {};
-
-  const customCssValues = uniqueStringList(
-    extractTopLevelPropertyExpressions(content, "customCss")
-      .map((expression) => {
-        try {
-          const value = evaluateExpression(expression);
-          return typeof value === "string" ? value : "";
-        } catch {
-          return "";
-        }
-      })
-      .concat(typeof baseValue.customCss === "string" ? baseValue.customCss : ""),
-  );
-
+  const baseValue = parseAssignedOverrideObject(content);
+  const customCssValues = uniqueStringList([
+    typeof baseValue.customCss === "string" ? baseValue.customCss : "",
+  ]);
   const elementValues = uniqueObjectList(
-    extractTopLevelPropertyExpressions(content, "elements")
-      .map((expression) => {
-        try {
-          const value = evaluateExpression(expression);
-          return Array.isArray(value)
-            ? value.filter(isPlainObject).map((entry) => ({ ...entry }))
-            : [];
-        } catch {
-          return [];
-        }
-      })
-      .flat()
-      .concat(
-        Array.isArray(baseValue.elements)
-          ? baseValue.elements.filter(isPlainObject).map((entry) => ({ ...entry }))
-          : [],
-      ),
+    Array.isArray(baseValue.elements)
+      ? baseValue.elements.filter(isPlainObject).map((entry) => ({ ...entry }))
+      : [],
   );
 
   const globalValue = isPlainObject(baseValue.global) ? { ...baseValue.global } : {};
@@ -704,9 +548,9 @@ export function getPreferredStaticEditableFile(files: string[]): string | null {
 }
 
 export async function ensureStaticEditableOverridesSupport(projectDir: string): Promise<void> {
-  const configPath = path.join(projectDir, OVERRIDES_CONFIG_PATH);
-  const enginePath = path.join(projectDir, OVERRIDES_ENGINE_PATH);
-  const cssPath = path.join(projectDir, OVERRIDES_CSS_PATH);
+  const configPath = resolveInsideRoot(projectDir, OVERRIDES_CONFIG_PATH);
+  const enginePath = resolveInsideRoot(projectDir, OVERRIDES_ENGINE_PATH);
+  const cssPath = resolveInsideRoot(projectDir, OVERRIDES_CSS_PATH);
 
   if (await pathExists(configPath)) {
     const currentConfig = await fs.readFile(configPath, "utf8");
@@ -724,7 +568,7 @@ export async function ensureStaticEditableOverridesSupport(projectDir: string): 
   }
 
   if (!(await pathExists(cssPath))) {
-    await fs.mkdir(path.dirname(cssPath), { recursive: true });
+    await fs.mkdir(resolveInsideRoot(projectDir, "editable"), { recursive: true });
     await fs.writeFile(
       cssPath,
       "/* Prompt-editable style layer. */\n.is-hidden-by-override { display: none !important; }\n",
@@ -737,7 +581,7 @@ export async function appendElementOverride(
   projectDir: string,
   entry: Record<string, unknown>,
 ): Promise<string> {
-  const configPath = path.join(projectDir, OVERRIDES_CONFIG_PATH);
+  const configPath = resolveInsideRoot(projectDir, OVERRIDES_CONFIG_PATH);
   const currentConfig = await fs.readFile(configPath, "utf8");
   const normalizedConfig = readOverrideConfigValue(currentConfig);
   normalizedConfig.elements = uniqueObjectList([...normalizedConfig.elements, entry]);
@@ -752,7 +596,7 @@ export async function appendGlobalTextReplacement(
   projectDir: string,
   entry: Record<string, unknown>,
 ): Promise<string> {
-  const configPath = path.join(projectDir, OVERRIDES_CONFIG_PATH);
+  const configPath = resolveInsideRoot(projectDir, OVERRIDES_CONFIG_PATH);
   const currentConfig = await fs.readFile(configPath, "utf8");
   const normalizedConfig = readOverrideConfigValue(currentConfig);
   const globalConfig = isPlainObject(normalizedConfig.global) ? { ...normalizedConfig.global } : {};

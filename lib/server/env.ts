@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { resolveInsideRoot } from "@/lib/server/path-utils";
+
 interface EnvConfig {
   anthropicApiKey?: string;
   githubClientId?: string;
@@ -19,15 +21,59 @@ interface EnvConfig {
 
 let cachedEnv: EnvConfig | null = null;
 
+function normalizeConfiguredPath(value: string, label: string): string {
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`${label} contains control characters.`);
+  }
+  return path.resolve(value);
+}
+
+/**
+ * Keep administrator-configured storage under one of the application's managed
+ * roots. Railway mounts its persistent volume at /data; local development uses
+ * the application working directory. Normalizing and checking path.relative
+ * prevents sibling-prefix and traversal escapes before any filesystem access.
+ */
+export function resolveConfiguredStorageRoot(value: string): string {
+  const resolvedStorageRoot = normalizeConfiguredPath(value, "STORAGE_ROOT");
+  const applicationRoot = path.resolve(process.cwd());
+  const relativeToApplication = path.relative(applicationRoot, resolvedStorageRoot);
+  if (
+    relativeToApplication !== ".." &&
+    !relativeToApplication.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relativeToApplication)
+  ) {
+    return resolvedStorageRoot;
+  }
+
+  const persistentVolumeRoot = path.resolve(path.parse(applicationRoot).root, "data");
+  const relativeToVolume = path.relative(persistentVolumeRoot, resolvedStorageRoot);
+  if (
+    relativeToVolume !== ".." &&
+    !relativeToVolume.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relativeToVolume)
+  ) {
+    return resolvedStorageRoot;
+  }
+
+  throw new Error("STORAGE_ROOT must be inside the application directory or /data.");
+}
+
 export function getEnv(): EnvConfig {
   if (cachedEnv) {
     return cachedEnv;
   }
 
-  const storageRoot =
-    process.env.STORAGE_ROOT || path.join(process.cwd(), ".mymake-data");
-  const databasePath =
-    process.env.SQLITE_DB_PATH || path.join(storageRoot, "mymake.sqlite");
+  const storageRoot = resolveConfiguredStorageRoot(
+    process.env.STORAGE_ROOT || path.join(process.cwd(), ".mymake-data"),
+  );
+  const configuredDatabasePath = process.env.SQLITE_DB_PATH
+    ? normalizeConfiguredPath(process.env.SQLITE_DB_PATH, "SQLITE_DB_PATH")
+    : resolveInsideRoot(storageRoot, "mymake.sqlite");
+  const databasePath = resolveInsideRoot(
+    storageRoot,
+    path.relative(storageRoot, configuredDatabasePath),
+  );
 
   cachedEnv = {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
