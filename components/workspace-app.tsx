@@ -1539,6 +1539,18 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
     currentProject,
     previewNonce,
   ]);
+  const previewOrigin = useMemo(() => {
+    if (!currentProject) {
+      return null;
+    }
+
+    try {
+      const url = new URL(currentProject.preview.url, window.location.origin);
+      return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
+    } catch {
+      return null;
+    }
+  }, [currentProject]);
   const isPreviewStarting = Boolean(currentProject && currentProject.preview.status === "starting");
   const enabledAiModels = useMemo(
     () => snapshot.aiModels.filter((model) => model.enabled),
@@ -1882,6 +1894,14 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
   useEffect(() => {
     function handleMessage(event: MessageEvent) {
+      if (
+        !previewOrigin ||
+        event.origin !== previewOrigin ||
+        event.source !== iframeRef.current?.contentWindow
+      ) {
+        return;
+      }
+
       if (!event.data || event.data.channel !== "MYMAKE_PREVIEW_BRIDGE") {
         return;
       }
@@ -1914,11 +1934,11 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, []);
+  }, [previewOrigin]);
 
   useEffect(() => {
     const frameWindow = iframeRef.current?.contentWindow;
-    if (!frameWindow || !currentProject) {
+    if (!frameWindow || !currentProject || !previewOrigin) {
       return;
     }
 
@@ -1928,9 +1948,9 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
         type: "MYMAKE_SET_PICKING",
         payload: { enabled: isPicking },
       },
-      "*",
+      previewOrigin,
     );
-  }, [currentProject, isPicking]);
+  }, [currentProject, isPicking, previewOrigin]);
 
   async function readJsonResponse<T>(response: Response): Promise<T> {
     const rawBody = await response.text();
@@ -4117,12 +4137,16 @@ export function WorkspaceApp({ initialSnapshot }: { initialSnapshot: DashboardSn
                           : "h-[calc(100vh-76px)] min-h-[620px] rounded-[20px] border border-white/[0.06] shadow-[0_30px_60px_rgba(0,0,0,0.22)]",
                       )}
                       onLoad={() => {
-                        iframeRef.current?.contentWindow?.postMessage(
+                        const frameWindow = iframeRef.current?.contentWindow;
+                        if (!frameWindow || !previewOrigin) {
+                          return;
+                        }
+                        frameWindow.postMessage(
                           {
                             channel: "MYMAKE_PREVIEW_BRIDGE",
                             type: "MYMAKE_PING",
                           },
-                          "*",
+                          previewOrigin,
                         );
                       }}
                     />

@@ -14,6 +14,9 @@ const port = Number(process.env.MYMAKE_CODEX_BRIDGE_PORT || 8766);
 const editRateLimitWindowMs = 60_000;
 const editRateLimitMaxRequests = 12;
 const editRateBuckets = new Map<string, { count: number; resetAt: number }>();
+const workspaceRateLimitWindowMs = 60_000;
+const workspaceRateLimitMaxRequests = 4;
+const workspaceRateBuckets = new Map<string, { count: number; resetAt: number }>();
 const bundledCodexBin = "/Applications/Codex.app/Contents/Resources/codex";
 const trustedCodexBins = [
   bundledCodexBin,
@@ -152,6 +155,37 @@ function enforceEditRateLimit(
   next();
 }
 
+function enforceWorkspaceRateLimit(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+): void {
+  const now = Date.now();
+  const key = req.ip || req.socket.remoteAddress || "local";
+  const current = workspaceRateBuckets.get(key);
+  const bucket =
+    !current || current.resetAt <= now
+      ? { count: 0, resetAt: now + workspaceRateLimitWindowMs }
+      : current;
+
+  if (bucket.count >= workspaceRateLimitMaxRequests) {
+    res.setHeader("Retry-After", String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
+    res.status(429).json({ error: "Too many workspace uploads. Try again in a moment." });
+    return;
+  }
+
+  bucket.count += 1;
+  workspaceRateBuckets.set(key, bucket);
+  if (workspaceRateBuckets.size > 1000) {
+    for (const [bucketKey, value] of workspaceRateBuckets) {
+      if (value.resetAt <= now) {
+        workspaceRateBuckets.delete(bucketKey);
+      }
+    }
+  }
+  next();
+}
+
 function stateKey(projectId: string, userId?: string | null): string {
   return `${userId || "anonymous"}:${projectId}`;
 }
@@ -228,6 +262,9 @@ async function loadConfig(): Promise<BridgeConfig> {
 
 async function saveConfig(config: BridgeConfig): Promise<void> {
   await ensureBridgeStorage();
+
+  // lgtm[js/http-to-file-access] The request is reduced to fixed enum/boolean
+  // values by normalizeAndApplyConfig before this local configuration write.
   await fsp.writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
 }
 
@@ -914,8 +951,10 @@ app.post("/v1/settings", async (req, res) => {
 
 app.put(
   "/v1/projects/:projectId/workspace",
+  enforceWorkspaceRateLimit,
   express.raw({ type: "application/zip", limit: "250mb" }),
   async (req, res) => {
+    const projectId = String(req.params.projectId);
     const userId =
       typeof req.headers["x-mymake-user-id"] === "string"
         ? req.headers["x-mymake-user-id"]
@@ -923,7 +962,7 @@ app.put(
     const projectName =
       typeof req.headers["x-mymake-project-name"] === "string"
         ? req.headers["x-mymake-project-name"]
-        : req.params.projectId;
+        : projectId;
     const revisionId =
       typeof req.headers["x-mymake-revision-id"] === "string"
         ? req.headers["x-mymake-revision-id"]
@@ -936,14 +975,14 @@ app.put(
     }
 
     const state = await loadState();
-    const key = stateKey(req.params.projectId, userId);
-    const projectDir = projectDirFor(req.params.projectId, userId);
-    const workspaceDir = workspaceDirFor(req.params.projectId, userId);
+    const key = stateKey(projectId, userId);
+    const projectDir = projectDirFor(projectId, userId);
+    const workspaceDir = workspaceDirFor(projectId, userId);
     await fsp.mkdir(projectDir, { recursive: true });
     await extractZipBufferToDirectory(body, workspaceDir);
 
     state.projects[key] = {
-      projectId: req.params.projectId,
+      projectId,
       userId,
       projectName,
       threadId: state.projects[key]?.threadId || null,
@@ -954,7 +993,7 @@ app.put(
 
     res.json({
       ok: true,
-      projectId: req.params.projectId,
+      projectId,
       threadId: state.projects[key].threadId,
       lastSyncedRevisionId: revisionId,
     });

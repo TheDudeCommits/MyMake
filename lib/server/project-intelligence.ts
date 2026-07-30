@@ -484,13 +484,12 @@ async function readJsonFile<T>(projectDir: string, relativePath: string): Promis
 }
 
 function defaultProjectBrief(params: {
-  projectName: string;
   runtime: ProjectRuntime;
   packageManager: PackageManager;
 }): string {
   return `# Project Brief
 
-Project: ${params.projectName}
+Project: Local workspace
 Audience: personal-first internal design work
 Runtime: ${params.runtime}
 Package manager: ${params.packageManager}
@@ -587,7 +586,6 @@ export async function ensureProjectKnowledgeArtifacts(params: {
     await fs.writeFile(
       projectBriefPath,
       defaultProjectBrief({
-        projectName: params.projectName,
         runtime: params.runtime,
         packageManager: params.packageManager,
       }),
@@ -635,7 +633,6 @@ export async function readKnowledgeFiles(projectDir: string): Promise<{
 }> {
   const projectBrief =
     (await readTextFile(projectDir, PROJECT_BRIEF_PATH)) || defaultProjectBrief({
-      projectName: "Untitled project",
       runtime: "static",
       packageManager: "npm",
     });
