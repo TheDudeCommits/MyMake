@@ -1,6 +1,7 @@
 import { ZipArchive } from "archiver";
 import AdmZip from "adm-zip";
 import express from "express";
+import { rateLimit } from "express-rate-limit";
 import { constants as fsConstants, existsSync } from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -14,9 +15,6 @@ const port = Number(process.env.MYMAKE_CODEX_BRIDGE_PORT || 8766);
 const editRateLimitWindowMs = 60_000;
 const editRateLimitMaxRequests = 12;
 const editRateBuckets = new Map<string, { count: number; resetAt: number }>();
-const workspaceRateLimitWindowMs = 60_000;
-const workspaceRateLimitMaxRequests = 4;
-const workspaceRateBuckets = new Map<string, { count: number; resetAt: number }>();
 const bundledCodexBin = "/Applications/Codex.app/Contents/Resources/codex";
 const trustedCodexBins = [
   bundledCodexBin,
@@ -155,36 +153,13 @@ function enforceEditRateLimit(
   next();
 }
 
-function enforceWorkspaceRateLimit(
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction,
-): void {
-  const now = Date.now();
-  const key = req.ip || req.socket.remoteAddress || "local";
-  const current = workspaceRateBuckets.get(key);
-  const bucket =
-    !current || current.resetAt <= now
-      ? { count: 0, resetAt: now + workspaceRateLimitWindowMs }
-      : current;
-
-  if (bucket.count >= workspaceRateLimitMaxRequests) {
-    res.setHeader("Retry-After", String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
-    res.status(429).json({ error: "Too many workspace uploads. Try again in a moment." });
-    return;
-  }
-
-  bucket.count += 1;
-  workspaceRateBuckets.set(key, bucket);
-  if (workspaceRateBuckets.size > 1000) {
-    for (const [bucketKey, value] of workspaceRateBuckets) {
-      if (value.resetAt <= now) {
-        workspaceRateBuckets.delete(bucketKey);
-      }
-    }
-  }
-  next();
-}
+const enforceWorkspaceRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: 4,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Too many workspace uploads. Try again in a moment." },
+});
 
 function stateKey(projectId: string, userId?: string | null): string {
   return `${userId || "anonymous"}:${projectId}`;
