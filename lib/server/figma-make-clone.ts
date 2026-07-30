@@ -347,6 +347,20 @@ class AiProjectMemoryUpdater implements ProjectMemoryUpdater {
   }
 }
 
+export function assertLoopbackWebSocketUrl(value: string): string {
+  const url = new URL(value);
+  const loopbackHosts = new Set(["127.0.0.1", "[::1]", "localhost"]);
+  if (
+    url.protocol !== "ws:" ||
+    !loopbackHosts.has(url.hostname.toLowerCase()) ||
+    url.username ||
+    url.password
+  ) {
+    throw new Error("Figma plugin bridge URL must be an unauthenticated loopback ws:// endpoint.");
+  }
+  return url.toString();
+}
+
 export class FigmaPluginWebSocketClient implements FigmaPluginBridge {
   private readonly url: string;
   private readonly timeoutMs: number;
@@ -362,7 +376,7 @@ export class FigmaPluginWebSocketClient implements FigmaPluginBridge {
   >();
 
   constructor(url: string, timeoutMs = 30_000) {
-    this.url = url;
+    this.url = assertLoopbackWebSocketUrl(url);
     this.timeoutMs = timeoutMs;
   }
 
@@ -430,6 +444,8 @@ export class FigmaPluginWebSocketClient implements FigmaPluginBridge {
         timeout,
       });
 
+      // lgtm[js/file-access-to-http] The constructor restricts this transport to
+      // a loopback-only ws:// endpoint owned by the local Figma plugin bridge.
       this.socket?.send(payload, (error) => {
         if (!error) {
           return;
