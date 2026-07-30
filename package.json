@@ -16,7 +16,7 @@
     "codex-bridge": "tsx scripts/codex-bridge.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.86.1",
+    "@anthropic-ai/sdk": "^0.91.1",
     "@heroicons/react": "^2.1.5",
     "@monaco-editor/react": "^4.7.0",
     "@phosphor-icons/webcomponents": "^2.1.5",
