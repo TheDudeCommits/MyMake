@@ -65,6 +65,10 @@ test("preview messaging and workspace uploads retain their trust-boundary guards
   assert.doesNotMatch(workspaceSource, /postMessage\([\s\S]{0,240}"\*"/);
   assert.match(
     bridgeSource,
+    /const enforceWorkspaceRateLimit = rateLimit\(\{/,
+  );
+  assert.match(
+    bridgeSource,
     /"\/v1\/projects\/:projectId\/workspace",\s+enforceWorkspaceRateLimit,/,
   );
 });
