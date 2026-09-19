@@ -23,7 +23,7 @@
     "@privy-io/node": "^0.14.0",
     "@privy-io/react-auth": "^3.21.2",
     "@types/ws": "^8.18.1",
-    "adm-zip": "^0.6.0",
+    "adm-zip": "^0.6.1",
     "archiver": "^8.0.0",
     "better-sqlite3": "^12.8.0",
     "clsx": "^2.1.1",
